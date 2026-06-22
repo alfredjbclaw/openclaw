@@ -1,5 +1,6 @@
 // Qa Lab tests cover server plugin behavior.
 import { afterEach, describe, expect, it } from "vitest";
+import { buildInboundUserContextPrefix } from "../../../../../src/auto-reply/reply/inbound-meta.js";
 import { resolveProviderVariant, startQaMockOpenAiServer } from "./server.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -80,12 +81,36 @@ function outputItem(payload: unknown, index = 0) {
   return requireRecord(output[index], `response output ${index}`);
 }
 
+function outputItems(payload: unknown) {
+  return requireArray(requireRecord(payload, "response payload").output, "response output").map(
+    (item, index) => requireRecord(item, `response output ${index}`),
+  );
+}
+
 function outputToolArgs(payload: unknown, index = 0) {
   const item = outputItem(payload, index);
+  return outputToolArgsFromItem(item);
+}
+
+function outputToolArgsFromItem(item: Record<string, unknown>) {
   if (typeof item.arguments !== "string") {
     throw new Error("Expected response output arguments");
   }
   return requireRecord(JSON.parse(item.arguments) as unknown, "response output arguments");
+}
+
+function outputToolCall(payload: unknown, name: string) {
+  const toolCall = outputItems(payload).find(
+    (item) => item.type === "function_call" && item.name === name,
+  );
+  if (!toolCall) {
+    throw new Error(`Expected ${name} tool call`);
+  }
+  return toolCall;
+}
+
+function outputToolCallId(item: Record<string, unknown>, fallback: string) {
+  return typeof item.call_id === "string" ? item.call_id : fallback;
 }
 
 function outputContentItem(payload: unknown, outputIndex = 0, contentIndex = 0) {
@@ -108,8 +133,40 @@ function makeUserInput(text: string) {
   };
 }
 
+function makeDeveloperInput(text: string) {
+  return {
+    role: "developer" as const,
+    content: [{ type: "input_text" as const, text }],
+  };
+}
+
 const SESSIONS_SPAWN_TOOL = { type: "function", name: "sessions_spawn" } as const;
 const SESSIONS_YIELD_TOOL = { type: "function", name: "sessions_yield" } as const;
+const READ_TOOL = { type: "function", name: "read" } as const;
+const MESSAGE_TOOL = { type: "function", name: "message" } as const;
+const WHATSAPP_AGENT_REACT_PROMPT =
+  "React to this WhatsApp message with thumbs up for QA action check WHATSAPP_QA_AGENT_REACT_TEST.";
+const WHATSAPP_AGENT_UPLOAD_TOKEN = "WHATSAPP_QA_AGENT_UPLOAD_TEST";
+const WHATSAPP_AGENT_UPLOAD_PROMPT =
+  `Use the WhatsApp message tool upload-file action to send a PNG with caption ${WHATSAPP_AGENT_UPLOAD_TOKEN}. ` +
+  "Do not send any visible text reply after the upload.";
+const WHATSAPP_PENDING_HISTORY_QUIET_MARKER = "WHATSAPP_QA_PENDING_HISTORY_QUIET_TEST";
+const WHATSAPP_PENDING_HISTORY_CONTEXT_SENTINEL = "WHATSAPP_QA_PENDING_HISTORY_CONTEXT_ONLY_TEST";
+const WHATSAPP_PENDING_HISTORY_TRIGGER_MARKER = "WHATSAPP_QA_PENDING_HISTORY_TRIGGER_TEST";
+const WHATSAPP_PENDING_HISTORY_OK_MARKER = "WHATSAPP_QA_PENDING_HISTORY_OK_TEST";
+const WHATSAPP_PENDING_HISTORY_TRIGGER_PROMPT = [
+  "openclawqa pending history context check",
+  WHATSAPP_PENDING_HISTORY_TRIGGER_MARKER,
+  `Return ${WHATSAPP_PENDING_HISTORY_OK_MARKER} only if prior group context contains ${WHATSAPP_PENDING_HISTORY_CONTEXT_SENTINEL}.`,
+].join(" ");
+const WHATSAPP_BROADCAST_TOKEN = "WHATSAPP_QA_BROADCAST_TOKEN_TEST";
+const WHATSAPP_BROADCAST_PROMPT = `openclawqa broadcast fanout check ${WHATSAPP_BROADCAST_TOKEN}`;
+const WHATSAPP_ACTIVATION_ALWAYS_MARKER = "WHATSAPP_QA_ACTIVATION_ALWAYS_TEST";
+const WHATSAPP_ACTIVATION_ALWAYS_PROMPT = `Group activation visible behavior marker ${WHATSAPP_ACTIVATION_ALWAYS_MARKER}`;
+const WHATSAPP_REPLY_TO_BOT_SEED_MARKER = "WHATSAPP_QA_REPLY_TO_BOT_SEED_TEST";
+const WHATSAPP_REPLY_TO_BOT_SEED_PROMPT = `Mentioned group seed marker ${WHATSAPP_REPLY_TO_BOT_SEED_MARKER}`;
+const WHATSAPP_REPLY_TO_BOT_TRIGGER_MARKER = "WHATSAPP_QA_REPLY_TO_BOT_TRIGGER_TEST";
+const WHATSAPP_REPLY_TO_BOT_TRIGGER_PROMPT = `Quoted implicit reply trigger marker ${WHATSAPP_REPLY_TO_BOT_TRIGGER_MARKER}`;
 const THREAD_SUBAGENT_CHILD_ERROR_TOKEN = "QA_SUBAGENT_CHILD_ERROR";
 const THREAD_SUBAGENT_TOOL_ERROR =
   "thread=true requested but thread delivery is unavailable in this test harness.";
@@ -989,6 +1046,289 @@ describe("qa mock openai server", () => {
     expect(firstPayload.output?.[0]?.call_id).toMatch(/^call_mock_read_/);
     expect(secondPayload.output?.[0]?.call_id).toMatch(/^call_mock_read_/);
     expect(firstPayload.output?.[0]?.call_id).not.toBe(secondPayload.output?.[0]?.call_id);
+  });
+
+  it("emits WhatsApp agent reaction message tool calls only when the tool is declared", async () => {
+    const server = await startMockServer();
+
+    const undeclaredPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput(WHATSAPP_AGENT_REACT_PROMPT)],
+    });
+
+    expect(
+      outputItems(undeclaredPayload).some(
+        (item) => item.type === "function_call" && item.name === "message",
+      ),
+    ).toBe(false);
+
+    const unrelatedToolPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      tools: [READ_TOOL],
+      input: [makeUserInput(WHATSAPP_AGENT_REACT_PROMPT)],
+    });
+
+    expect(
+      outputItems(unrelatedToolPayload).some(
+        (item) => item.type === "function_call" && item.name === "message",
+      ),
+    ).toBe(false);
+
+    const declaredPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      tools: [MESSAGE_TOOL],
+      input: [makeUserInput(WHATSAPP_AGENT_REACT_PROMPT)],
+    });
+
+    const toolCall = outputToolCall(declaredPayload, "message");
+    expect(toolCall).toMatchObject({
+      type: "function_call",
+      name: "message",
+    });
+    expect(outputToolArgsFromItem(toolCall)).toEqual({
+      action: "react",
+      emoji: "👍",
+    });
+
+    const afterToolPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      tools: [MESSAGE_TOOL],
+      input: [
+        makeUserInput(WHATSAPP_AGENT_REACT_PROMPT),
+        {
+          type: "function_call_output",
+          call_id: outputToolCallId(toolCall, "call_mock_message_react"),
+          output: "reaction sent",
+        },
+      ],
+    });
+
+    expect(
+      outputItems(afterToolPayload).some(
+        (item) => item.type === "function_call" && item.name === "message",
+      ),
+    ).toBe(false);
+    expect(
+      outputItems(afterToolPayload)
+        .flatMap((item) => (Array.isArray(item.content) ? item.content : []))
+        .map((content) => requireRecord(content, "assistant content").text)
+        .filter((text): text is string => typeof text === "string" && text.trim().length > 0),
+    ).toEqual([]);
+  });
+
+  it("emits WhatsApp agent upload-file message tool calls only when the tool is declared", async () => {
+    const server = await startMockServer();
+
+    const undeclaredPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput(WHATSAPP_AGENT_UPLOAD_PROMPT)],
+    });
+
+    expect(
+      outputItems(undeclaredPayload).some(
+        (item) => item.type === "function_call" && item.name === "message",
+      ),
+    ).toBe(false);
+
+    const declaredPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      tools: [MESSAGE_TOOL],
+      input: [makeUserInput(WHATSAPP_AGENT_UPLOAD_PROMPT)],
+    });
+
+    const toolCall = outputToolCall(declaredPayload, "message");
+    expect(outputToolArgsFromItem(toolCall)).toMatchObject({
+      action: "upload-file",
+      caption: WHATSAPP_AGENT_UPLOAD_TOKEN,
+      contentType: "image/png",
+      filename: "whatsapp-qa-agent-upload.png",
+    });
+    expect(outputToolArgsFromItem(toolCall).buffer).toEqual(expect.any(String));
+
+    const afterToolPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      tools: [MESSAGE_TOOL],
+      input: [
+        makeUserInput(WHATSAPP_AGENT_UPLOAD_PROMPT),
+        {
+          type: "function_call_output",
+          call_id: outputToolCallId(toolCall, "call_mock_message_upload"),
+          output: "media sent",
+        },
+      ],
+    });
+
+    expect(
+      outputItems(afterToolPayload).some(
+        (item) => item.type === "function_call" && item.name === "message",
+      ),
+    ).toBe(false);
+    expect(outputText(afterToolPayload)).toBe("");
+  });
+
+  it("answers WhatsApp pending-history prompts only with injected prior group context", async () => {
+    const server = await startMockServer();
+
+    const historyContext = buildInboundUserContextPrefix({
+      ChatType: "group",
+      InboundHistory: [
+        {
+          sender: "Alice",
+          timestamp: 1_786_000_000_000,
+          body: `quiet context ${WHATSAPP_PENDING_HISTORY_QUIET_MARKER} ${WHATSAPP_PENDING_HISTORY_CONTEXT_SENTINEL}`,
+        },
+      ],
+    });
+    const withStructuredHistory = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput([historyContext, WHATSAPP_PENDING_HISTORY_TRIGGER_PROMPT].join("\n"))],
+    });
+
+    expect(outputText(withStructuredHistory)).toBe(WHATSAPP_PENDING_HISTORY_OK_MARKER);
+
+    const triggerTextOnly = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [
+        makeUserInput(
+          [
+            WHATSAPP_PENDING_HISTORY_TRIGGER_PROMPT,
+            `The current trigger text mentions ${WHATSAPP_PENDING_HISTORY_QUIET_MARKER}.`,
+            `It also mentions ${WHATSAPP_PENDING_HISTORY_CONTEXT_SENTINEL}.`,
+          ].join(" "),
+        ),
+      ],
+    });
+
+    expect(outputText(triggerTextOnly)).not.toBe(WHATSAPP_PENDING_HISTORY_OK_MARKER);
+
+    const currentMessageOnlySentinel = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [
+        makeUserInput(
+          [
+            buildInboundUserContextPrefix({
+              ChatType: "group",
+              InboundHistory: [
+                {
+                  sender: "Alice",
+                  timestamp: 1_786_000_000_000,
+                  body: "unrelated prior context",
+                },
+              ],
+            }),
+            WHATSAPP_PENDING_HISTORY_TRIGGER_PROMPT,
+            `The current trigger text mentions ${WHATSAPP_PENDING_HISTORY_QUIET_MARKER}.`,
+            `It also mentions ${WHATSAPP_PENDING_HISTORY_CONTEXT_SENTINEL}.`,
+          ].join("\n"),
+        ),
+      ],
+    });
+
+    expect(outputText(currentMessageOnlySentinel)).not.toBe(WHATSAPP_PENDING_HISTORY_OK_MARKER);
+
+    const contextWithoutCurrentTrigger = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [
+        makeUserInput(
+          [historyContext, "openclawqa pending history context check without current trigger"].join(
+            "\n",
+          ),
+        ),
+      ],
+    });
+
+    expect(outputText(contextWithoutCurrentTrigger)).not.toBe(WHATSAPP_PENDING_HISTORY_OK_MARKER);
+  });
+
+  it("uses the WhatsApp broadcast runtime agent id context for distinct markers", async () => {
+    const server = await startMockServer();
+
+    const mainPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [
+        makeDeveloperInput("Runtime: agent=main | channel=whatsapp | capabilities=messageactions"),
+        makeUserInput(WHATSAPP_BROADCAST_PROMPT),
+      ],
+    });
+    const secondPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [
+        makeDeveloperInput(
+          "Runtime: agent=qa-second | channel=whatsapp | capabilities=messageactions",
+        ),
+        makeUserInput(WHATSAPP_BROADCAST_PROMPT),
+      ],
+    });
+    const noIdentityPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [
+        makeDeveloperInput("Runtime: channel=whatsapp | capabilities=messageactions"),
+        makeUserInput(WHATSAPP_BROADCAST_PROMPT),
+      ],
+    });
+
+    expect(outputText(mainPayload)).toBe(`${WHATSAPP_BROADCAST_TOKEN}_MAIN`);
+    expect(outputText(secondPayload)).toBe(`${WHATSAPP_BROADCAST_TOKEN}_SECOND`);
+    expect(outputText(noIdentityPayload)).not.toMatch(
+      new RegExp(`${WHATSAPP_BROADCAST_TOKEN}_(?:MAIN|SECOND)`, "u"),
+    );
+  });
+
+  it("answers the WhatsApp activation-always marker without matching unrelated prompts", async () => {
+    const server = await startMockServer();
+
+    const activationPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput(WHATSAPP_ACTIVATION_ALWAYS_PROMPT)],
+    });
+    const unrelatedPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput("Group activation visible behavior marker WHATSAPP_QA_UNRELATED_TEST")],
+    });
+
+    expect(outputText(activationPayload)).toBe(WHATSAPP_ACTIVATION_ALWAYS_MARKER);
+    expect(outputText(unrelatedPayload)).not.toBe(WHATSAPP_ACTIVATION_ALWAYS_MARKER);
+  });
+
+  it("answers reply-to-bot seed and implicit quoted-trigger markers deterministically", async () => {
+    const server = await startMockServer();
+
+    const seedPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput(WHATSAPP_REPLY_TO_BOT_SEED_PROMPT)],
+    });
+    const triggerPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput(WHATSAPP_REPLY_TO_BOT_TRIGGER_PROMPT)],
+    });
+    const unrelatedPayload = await expectResponsesJson(server, {
+      stream: false,
+      model: "gpt-5.5",
+      input: [makeUserInput("Quoted implicit reply trigger marker WHATSAPP_QA_UNRELATED_TEST")],
+    });
+
+    expect(WHATSAPP_REPLY_TO_BOT_TRIGGER_PROMPT).not.toMatch(/\bopenclawqa\b/iu);
+    expect(outputText(seedPayload)).toBe(WHATSAPP_REPLY_TO_BOT_SEED_MARKER);
+    expect(outputText(triggerPayload)).toBe(WHATSAPP_REPLY_TO_BOT_TRIGGER_MARKER);
+    expect(outputText(unrelatedPayload)).not.toBe(WHATSAPP_REPLY_TO_BOT_TRIGGER_MARKER);
   });
 
   it("continues repo-contract followthrough when a retry user item follows tool output", async () => {
@@ -2820,6 +3160,79 @@ describe("qa mock openai server", () => {
 
     expect(response.status).toBe(200);
     expect(outputText(await response.json())).toBe("NEW_TOKEN");
+  });
+
+  it("requires both WhatsApp batched markers before returning the final batched marker", async () => {
+    const server = await startQaMockOpenAiServer({
+      host: "127.0.0.1",
+      port: 0,
+    });
+    cleanups.push(async () => {
+      await server.stop();
+    });
+
+    const standalone = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        stream: false,
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "Second batched WhatsApp QA message. Reply with only this exact marker: " +
+                  "WHATSAPP_QA_BATCHED_FINAL_TEST only if the previous queued message is visible " +
+                  "in this same run context.",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(standalone.status).toBe(200);
+    expect(outputText(await standalone.json())).toBe("WHATSAPP_QA_BATCHED_MISSING_CONTEXT_TEST");
+
+    const batched = await fetch(`${server.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        stream: false,
+        input: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "First batched WhatsApp QA message WHATSAPP_QA_BATCHED_FIRST_TEST. " +
+                  "Wait for the next message before replying.",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text:
+                  "Second batched WhatsApp QA message. Reply with only this exact marker: " +
+                  "WHATSAPP_QA_BATCHED_FINAL_TEST only if the previous queued message is visible " +
+                  "in this same run context.",
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(batched.status).toBe(200);
+    expect(outputText(await batched.json())).toBe("WHATSAPP_QA_BATCHED_FINAL_TEST");
   });
 
   it("lets the latest exact marker prompt beat stale Telegram session_status history", async () => {
