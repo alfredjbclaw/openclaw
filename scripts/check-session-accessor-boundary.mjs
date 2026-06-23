@@ -74,11 +74,14 @@ export const allowedSessionStoreRuntimeFileBackedCompatExports = new Set([
 
 export const migratedSessionAccessorFiles = new Set([
   "packages/memory-host-sdk/src/host/session-files.ts",
+  "src/agents/auth-profiles/session-override.ts",
   "src/agents/embedded-agent-runner/compaction-successor-transcript.ts",
   "src/agents/embedded-agent-runner/run/attempt.ts",
   "src/agents/embedded-agent-runner/tool-result-truncation.ts",
   "src/agents/embedded-agent-runner/transcript-rewrite.ts",
   "src/agents/embedded-agent-runner/transcript-runtime-state.ts",
+  "src/agents/subagent-control.ts",
+  "src/agents/subagent-registry-helpers.ts",
   "src/auto-reply/reply/agent-runner-helpers.ts",
   "src/auto-reply/reply/agent-runner.ts",
   "src/auto-reply/reply/commands-subagents/action-info.ts",
@@ -120,11 +123,15 @@ export const migratedBundledPluginSessionAccessorFiles = new Set([
 ]);
 
 export const migratedSessionAccessorWriteFiles = new Set([
+  "src/agents/auth-profiles/session-override.ts",
   "src/agents/command/attempt-execution.shared.ts",
   "src/agents/command/session-store.ts",
   "src/agents/embedded-agent-runner/run.ts",
   "src/agents/embedded-agent-runner/run/attempt.ts",
+  "src/agents/live-model-switch.ts",
   "src/agents/main-session-restart-recovery.ts",
+  "src/agents/subagent-control.ts",
+  "src/agents/subagent-registry-helpers.ts",
   "src/auto-reply/reply/abort-cutoff.runtime.ts",
   "src/auto-reply/reply/agent-runner-cli-dispatch.ts",
   "src/auto-reply/reply/agent-runner-execution.ts",
