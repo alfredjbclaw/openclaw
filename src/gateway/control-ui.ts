@@ -464,6 +464,13 @@ export async function handleControlUiAssistantMediaRequest(
       allowRealIpFallback: opts?.allowRealIpFallback,
       rateLimiter: opts?.rateLimiter,
       allowQueryToken: true,
+      // The metadata read serves no file bytes; it reports availability and
+      // mints the source-scoped, short-lived ticket the dashboard needs before
+      // it may fetch bytes. That mint is the one step a tokenless Tailscale
+      // Serve dashboard cannot otherwise complete, so it accepts the same
+      // same-origin ambient identity as the bootstrap config read. Byte reads
+      // still require the minted ticket or a real credential.
+      allowAmbientTailscaleIdentity: isMetaRequest,
     }))
   ) {
     return true;
@@ -851,6 +858,7 @@ export async function handleControlUiHttpRequest(
         trustedProxies: opts?.trustedProxies,
         allowRealIpFallback: opts?.allowRealIpFallback,
         rateLimiter: opts?.rateLimiter,
+        allowAmbientTailscaleIdentity: true,
         onPluginFrameGrants: (grants) => {
           pluginFrameGrants = grants;
         },

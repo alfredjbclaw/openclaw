@@ -7,6 +7,7 @@ import { makeNetworkInterfacesSnapshot } from "../test-helpers/network-interface
 import { createAuthRateLimiter, type AuthRateLimiter } from "./auth-rate-limit.js";
 import {
   assertGatewayAuthConfigured,
+  authorizeControlUiBootstrapHttpGatewayConnect,
   authorizeHttpGatewayConnect,
   authorizeUserProfileAvatarHttpGatewayConnect,
   resolveEffectiveSharedGatewayAuth,
@@ -107,6 +108,7 @@ describe("gateway auth", () => {
 
   async function expectTailscaleHeaderAuthResult(params: {
     authorize:
+      | typeof authorizeControlUiBootstrapHttpGatewayConnect
       | typeof authorizeHttpGatewayConnect
       | typeof authorizeUserProfileAvatarHttpGatewayConnect
       | typeof authorizeWsControlUiGatewayConnect;
@@ -512,6 +514,61 @@ describe("gateway auth", () => {
       name: "Peter",
       profilePic: "https://avatars.example.test/peter.png",
     });
+  });
+
+  it("allows an origin-less same-origin bootstrap read over Tailscale Serve", async () => {
+    const req = createTailscaleForwardedReq();
+    const res = await authorizeControlUiBootstrapHttpGatewayConnect({
+      auth: { mode: "token", token: "secret", allowTailscale: true },
+      connectAuth: null,
+      tailscaleWhois: createTailscaleWhois(),
+      req,
+      browserOriginPolicy: createAvatarBrowserOriginPolicy(req),
+    });
+
+    expect(res).toMatchObject({ ok: true, method: "tailscale", user: "peter@github" });
+  });
+
+  it.each(["cross-site", "same-site", "none", undefined])(
+    "rejects an origin-less bootstrap read with fetch-site %s",
+    async (fetchSite) => {
+      const req = createTailscaleForwardedReq();
+      if (fetchSite === undefined) {
+        delete req.headers["sec-fetch-site"];
+      } else {
+        req.headers["sec-fetch-site"] = fetchSite;
+      }
+      const tailscaleWhois = vi.fn(createTailscaleWhois());
+
+      const res = await authorizeControlUiBootstrapHttpGatewayConnect({
+        auth: { mode: "token", token: "secret", allowTailscale: true },
+        connectAuth: null,
+        tailscaleWhois,
+        req,
+        browserOriginPolicy: createAvatarBrowserOriginPolicy(req),
+      });
+
+      expect(res).toMatchObject({ ok: false, reason: "origin_not_allowed" });
+      expect(tailscaleWhois).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects wildcard origin grants for ambient bootstrap identity", async () => {
+    const req = createTailscaleForwardedReq();
+    req.headers.origin = "https://evil.example";
+    req.headers["sec-fetch-site"] = "cross-site";
+    const tailscaleWhois = vi.fn(createTailscaleWhois());
+
+    const res = await authorizeControlUiBootstrapHttpGatewayConnect({
+      auth: { mode: "token", token: "secret", allowTailscale: true },
+      connectAuth: null,
+      tailscaleWhois,
+      req,
+      browserOriginPolicy: createAvatarBrowserOriginPolicy(req, ["*"]),
+    });
+
+    expect(res).toMatchObject({ ok: false, reason: "origin_not_allowed" });
+    expect(tailscaleWhois).not.toHaveBeenCalled();
   });
 
   it("rejects matching Tailscale-shaped identity without managed Serve provenance", async () => {
@@ -955,6 +1012,13 @@ describe("gateway auth", () => {
   it("enables tailscale header auth on ws control-ui auth wrapper", async () => {
     await expectTailscaleHeaderAuthResult({
       authorize: authorizeWsControlUiGatewayConnect,
+      expected: { ok: true, method: "tailscale", user: "peter@github" },
+    });
+  });
+
+  it("enables tailscale header auth on the control-ui bootstrap wrapper", async () => {
+    await expectTailscaleHeaderAuthResult({
+      authorize: authorizeControlUiBootstrapHttpGatewayConnect,
       expected: { ok: true, method: "tailscale", user: "peter@github" },
     });
   });
@@ -1404,6 +1468,36 @@ describe("trusted-proxy auth", () => {
           "x-forwarded-user": "nick@example.com",
           "x-forwarded-proto": "https",
         },
+      } as never,
+      browserOriginPolicy: {
+        requestHost: "gateway.example.com",
+        allowedOrigins: ["https://control.example.com"],
+      },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.method).toBe("trusted-proxy");
+    expect(res.user).toBe("nick@example.com");
+  });
+
+  it("keeps an origin-less trusted-proxy bootstrap request working when allowTailscale is enabled", async () => {
+    const res = await authorizeControlUiBootstrapHttpGatewayConnect({
+      auth: {
+        mode: "trusted-proxy",
+        allowTailscale: true,
+        trustedProxy: trustedProxyConfig,
+      },
+      connectAuth: null,
+      trustedProxies: ["10.0.0.1"],
+      req: {
+        socket: { remoteAddress: "10.0.0.1" },
+        headers: {
+          host: "gateway.example.com",
+          "x-forwarded-for": "203.0.113.10",
+          "x-forwarded-user": "nick@example.com",
+          "x-forwarded-proto": "https",
+        },
+        // SAFETY: minimal request fixture — this auth path reads only socket.remoteAddress and headers.
       } as never,
       browserOriginPolicy: {
         requestHost: "gateway.example.com",

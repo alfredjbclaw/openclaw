@@ -114,7 +114,7 @@ The assistant avatar override follows the same browser-local pattern: uploaded o
 
 ## Runtime config endpoint
 
-The Control UI fetches its runtime settings from `/control-ui-config.json`, resolved relative to the gateway's Control UI base path (for example `/__openclaw__/control-ui-config.json` under base path `/__openclaw__/`). That endpoint is gated by gateway HTTP auth: unauthenticated browsers cannot fetch it, and a successful fetch requires a valid gateway token/password or trusted-proxy identity. Tailscale header auth applies to the Control UI WebSocket, not this HTTP endpoint.
+The Control UI fetches its runtime settings from `/control-ui-config.json`, resolved relative to the gateway's Control UI base path (for example `/__openclaw__/control-ui-config.json` under base path `/__openclaw__/`). That endpoint is gated by gateway HTTP auth: unauthenticated browsers cannot fetch it, and a successful fetch requires a valid gateway token/password, trusted-proxy identity, or — over Tailscale Serve with `gateway.auth.allowTailscale: true` — a verified Tailscale identity making a same-origin browser fetch (see [Tailscale](/gateway/tailscale) for the origin rules). A Tailscale-authorized fetch returns dashboard metadata only: it grants no operator scopes beyond read access and projects no plugin frames. The assistant-media metadata request (`meta=1`) is covered by the same path, so a same-origin Tailscale fetch can check availability and receive the short-lived, source-scoped media ticket the dashboard uses to fetch bytes. Every route that serves local file bytes — assistant-media byte reads and avatar reads — still requires that minted ticket, a token, trusted-proxy identity, or paired device token.
 
 ## Gateway host status
 
@@ -729,7 +729,7 @@ If you disable gateway auth (not recommended on shared hosts), the avatar route 
 
 When gateway auth is configured, assistant local-media previews use a two-step route:
 
-- `GET /__openclaw__/assistant-media?meta=1&source=<path>` requires the normal Control UI operator auth; the browser sends the gateway token as a bearer header when checking availability.
+- `GET /__openclaw__/assistant-media?meta=1&source=<path>` requires the normal Control UI operator auth; the browser sends the gateway token as a bearer header when checking availability. Over Tailscale Serve with `gateway.auth.allowTailscale: true`, a verified Tailscale identity making a same-origin browser fetch may also perform this metadata read — it serves no file bytes and returns the source-scoped ticket used for the byte fetch.
 - Successful metadata responses include a short-lived `mediaTicket` scoped to that exact source path.
 - Browser-rendered image, audio, video, and document URLs use `mediaTicket=<ticket>` instead of the active gateway token or password. The ticket expires quickly and cannot authorize a different source.
 

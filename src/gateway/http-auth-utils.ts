@@ -16,6 +16,7 @@ import {
   AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET,
 } from "./auth-rate-limit.js";
 import {
+  authorizeControlUiBootstrapHttpGatewayConnect,
   authorizeHttpGatewayConnect,
   authorizeUserProfileAvatarHttpGatewayConnect,
   type GatewayAuthResult,
@@ -38,6 +39,7 @@ import {
 import {
   ADMIN_SCOPE,
   CLI_DEFAULT_OPERATOR_SCOPES,
+  READ_SCOPE,
   authorizeOperatorScopesForMethod,
 } from "./method-scopes.js";
 import { resolveBrowserOriginPolicy } from "./origin-check.js";
@@ -114,6 +116,13 @@ type ControlUiReadAuthParams = Omit<GatewayHttpRequestAuthParams, "auth"> & {
   allowQueryToken?: boolean;
   requiredOperatorMethod?: string;
   onPluginFrameGrants?: (grants: readonly ControlUiPluginFrameGrantAck[]) => void;
+  /**
+   * Accept ambient Tailscale identity from a same-origin browser fetch. Only the
+   * metadata-only bootstrap read and the assistant-media metadata/ticket-mint read
+   * set this; every route that serves local file bytes stays bound to a minted
+   * ticket or a real credential.
+   */
+  allowAmbientTailscaleIdentity?: boolean;
 };
 
 export function resolveHttpBrowserOriginPolicy(
@@ -193,8 +202,14 @@ function resolveControlUiReadOperatorScopes(
   if (authMethod === "device-token") {
     return deviceScopes ?? [];
   }
-  if (authMethod === "trusted-proxy" || authMethod === "tailscale") {
+  if (authMethod === "trusted-proxy") {
     return resolveTrustedHttpOperatorScopes(req, { trustDeclaredOperatorScopes: true });
+  }
+  if (authMethod === "tailscale") {
+    // Ambient tailnet identity is not paired-device authentication: it gets the
+    // read scope its metadata-only surfaces need and nothing else — no declared
+    // x-openclaw-scopes trust and no CLI default operator scopes.
+    return [READ_SCOPE];
   }
   return authMethod === "bootstrap-token" ? [] : [...CLI_DEFAULT_OPERATOR_SCOPES];
 }
@@ -223,7 +238,10 @@ export async function authorizeControlUiReadRequestOrReply(
   const canUseDeviceTokenFallback =
     Boolean(token) && auth.mode !== "trusted-proxy" && auth.mode !== "none";
   const run = async (): Promise<AuthorizedControlUiReadRequest | null> => {
-    const authResult = await authorizeHttpGatewayConnect({
+    const authorizeShared = params.allowAmbientTailscaleIdentity
+      ? authorizeControlUiBootstrapHttpGatewayConnect
+      : authorizeHttpGatewayConnect;
+    const authResult = await authorizeShared({
       auth,
       connectAuth: token ? { token, password: token } : null,
       req: params.req,
@@ -285,8 +303,11 @@ export async function authorizeControlUiReadRequestOrReply(
     }
 
     const authMethod = resolvedAuthResult.method ?? "none";
-    const trustDeclaredOperatorScopes =
-      authMethod === "trusted-proxy" || authMethod === "tailscale";
+    // Tailscale header auth proves tailnet identity, not operator authority, and the
+    // only surfaces accepting it here have no paired device to bound it. Excluding it
+    // withholds x-openclaw-scopes trust, CLI default operator scopes, and plugin-frame
+    // grants.
+    const trustDeclaredOperatorScopes = authMethod === "trusted-proxy";
     params.onPluginFrameGrants?.(
       setControlUiPluginAuthCookieForRequest(
         params.req,
