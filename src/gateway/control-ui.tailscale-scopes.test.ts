@@ -139,6 +139,26 @@ function postConnectDeviceCredential(principal = DASHBOARD_PRINCIPAL): string {
   return issued.credential;
 }
 
+/**
+ * Longer than the shipped credential TTL, so `postConnectDeviceCredential`
+ * minted this far back is certainly past its deadline now.
+ */
+const PAST_ANY_DEADLINE_MS = 13 * 60 * 60 * 1000;
+
+/** The same credential, minted at an explicit point in time. */
+function deviceCredentialIssuedAt(nowMs: number): string {
+  const issued = issueControlUiDeviceCredential({
+    deviceId: "device-tailscale-serve-dashboard",
+    principal: DASHBOARD_PRINCIPAL,
+    authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
+    nowMs,
+  });
+  if (!issued) {
+    throw new Error("expected a device-bound Control UI credential");
+  }
+  return issued.credential;
+}
+
 /** The shape this credential carried before it was bound to a principal. */
 function unboundDeviceCredential(): string {
   const token = issueUnboundControlUiDeviceCredentialForTest({
@@ -360,6 +380,46 @@ describe("control ui HTTP reads over Tailscale", () => {
       );
       expect(bytes.handled).toBe(true);
       expect(bytes.res.statusCode).toBe(200);
+    });
+  });
+
+  it("refuses a device credential the dashboard held past its deadline", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    await withAssistantMediaFile("tailscale-scopes-expired-credential", async (filePath) => {
+      const { res, end, handled } = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+          headers: {
+            authorization: `Bearer ${deviceCredentialIssuedAt(Date.now() - PAST_ANY_DEADLINE_MS)}`,
+          },
+        }),
+      );
+
+      expect(handled).toBe(true);
+      // The TTL is the whole reason the browser renews: nothing on this side
+      // extends a credential, so an aged one is refused on the same ingress,
+      // for the same verified principal that minted it.
+      expect(res.statusCode).toBe(401);
+      expect(readResponseBody(end)).not.toContain("mediaTicket");
+    });
+  });
+
+  it("serves assistant-media metadata to the credential a renewal reconnect minted", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    await withAssistantMediaFile("tailscale-scopes-renewed-credential", async (filePath) => {
+      // What `ui/src/app/control-ui-credential-renewal.ts` reconnects for: the
+      // dashboard's original credential is long past its deadline, and the
+      // replacement its pre-expiry reconnect obtained is what it now presents.
+      const { res, end, handled } = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+          headers: { authorization: `Bearer ${deviceCredentialIssuedAt(Date.now())}` },
+        }),
+      );
+
+      expect(handled).toBe(true);
+      expect(res.statusCode).toBe(200);
+      expect((JSON.parse(readResponseBody(end)) as { available?: boolean }).available).toBe(true);
     });
   });
 

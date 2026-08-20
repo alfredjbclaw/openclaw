@@ -19,6 +19,16 @@
 // It is not bound to a browser or a TLS session: another client running as the
 // same principal through the same managed Serve ingress can still replay it for
 // its TTL.
+//
+// Lifecycle, stated exactly: one is minted per authenticated connect, lives
+// `CONTROL_UI_DEVICE_CREDENTIAL_TTL_MS` (12h), and is never refreshed in place.
+// There is no refresh frame and no renewal endpoint — the only thing that mints
+// a replacement is another authenticated connect, so a browser holding one
+// socket open past the deadline would present an expired bearer. Keeping that
+// from happening is the Control UI's job: it reads `httpCredentialExpiresAtMs`
+// out of hello-ok and reconnects before the deadline
+// (`ui/src/app/control-ui-credential-renewal.ts`). A Gateway restart rotates the
+// secret below and invalidates every outstanding credential the same way.
 import { randomBytes } from "node:crypto";
 import { createControlUiSignedToken, readControlUiSignedToken } from "./control-ui-signed-token.js";
 import { READ_SCOPE } from "./operator-scopes.js";

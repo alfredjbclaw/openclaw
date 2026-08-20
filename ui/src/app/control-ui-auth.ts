@@ -5,7 +5,16 @@ import { uniqueStrings } from "@openclaw/normalization-core/string-normalization
 /** Every source a Control UI HTTP credential can come from, in one shape. */
 export type ControlUiAuthSource = {
   hello?: {
-    auth?: { deviceToken?: string | null; httpCredential?: string | null } | null;
+    auth?: {
+      deviceToken?: string | null;
+      httpCredential?: string | null;
+      /**
+       * Deadline the Gateway minted `httpCredential` against. Optional because
+       * only the lane that issues that credential sends it; a paired-device or
+       * older peer omits it and every consumer must behave as it did before.
+       */
+      httpCredentialExpiresAtMs?: number | null;
+    } | null;
   } | null;
   settings?: { token?: string | null } | null;
   password?: string | null;
@@ -36,6 +45,23 @@ export function resolveControlUiAuthToken(source: ControlUiAuthSource): string |
     sanitizeHeaderToken(normalizeOptionalString(source.password) ?? null) ??
     null
   );
+}
+
+// Only the Gateway-minted `httpCredential` expires out from under a live
+// browser: a paired device token, a saved settings token and a password all
+// outlive the session. So the deadline is reported only when that credential is
+// the one this source actually presents, which keeps every other lane inert.
+export function resolveControlUiCredentialExpiryMs(source: ControlUiAuthSource): number | null {
+  const credential = sanitizeHeaderToken(
+    normalizeOptionalString(source.hello?.auth?.httpCredential) ?? null,
+  );
+  if (!credential || resolveControlUiAuthToken(source) !== credential) {
+    return null;
+  }
+  const expiresAtMs = source.hello?.auth?.httpCredentialExpiresAtMs;
+  return typeof expiresAtMs === "number" && Number.isFinite(expiresAtMs) && expiresAtMs > 0
+    ? expiresAtMs
+    : null;
 }
 
 export function resolveControlUiAuthHeader(source: ControlUiAuthSource): string | null {

@@ -49,6 +49,22 @@ const HELLO: GatewayHelloOk = {
   auth: { role: "operator", scopes: [] },
 };
 
+/** Shipped Control UI HTTP credential TTL; the deadline hello-ok reports. */
+const CREDENTIAL_LIFETIME_MS = 12 * 60 * 60 * 1000;
+
+/** A hello from the Tailscale Serve lane: an HTTP credential, no device token. */
+function serveLaneHello(expiresAtMs: number): GatewayHelloOk {
+  return {
+    ...HELLO,
+    auth: {
+      role: "operator",
+      scopes: [],
+      httpCredential: "serve-credential",
+      httpCredentialExpiresAtMs: expiresAtMs,
+    },
+  };
+}
+
 function createGatewayEvent(event = "chat", payload: unknown = {}, seq = 1): GatewayEventFrame {
   return {
     type: "event",
@@ -563,6 +579,50 @@ describe("createApplicationGateway connection phase", () => {
     await vi.advanceTimersByTimeAsync(2_000);
 
     expect(gateway.snapshot.offlineStable).toBe(false);
+  });
+
+  it("reconnects before the Control UI HTTP credential expires", async () => {
+    vi.useFakeTimers();
+    const { gateway, current, clients } = createStore();
+    gateway.start();
+
+    current().opts.onHello?.(serveLaneHello(Date.now() + CREDENTIAL_LIFETIME_MS));
+    await vi.advanceTimersByTimeAsync(CREDENTIAL_LIFETIME_MS * 0.9);
+
+    // Only a fresh authenticated connect mints a replacement credential, so the
+    // renewal has to show up as a second client raised before the deadline.
+    expect(clients).toHaveLength(2);
+    expect(clients[0]?.stopped).toBe(1);
+  });
+
+  it("gives a paired-device session no timed reconnect", async () => {
+    vi.useFakeTimers();
+    const { gateway, current, clients } = createStore();
+    gateway.start();
+
+    current().opts.onHello?.({
+      ...HELLO,
+      auth: { role: "operator", scopes: [], deviceToken: "device-token" },
+    });
+    await vi.advanceTimersByTimeAsync(CREDENTIAL_LIFETIME_MS);
+
+    expect(clients).toHaveLength(1);
+  });
+
+  it("clears the pending credential renewal when stopped", async () => {
+    vi.useFakeTimers();
+    const { gateway, current, clients } = createStore();
+    gateway.start();
+    current().opts.onHello?.(serveLaneHello(Date.now() + CREDENTIAL_LIFETIME_MS));
+    expect(vi.getTimerCount()).toBe(1);
+
+    gateway.stop();
+
+    // A stopped gateway leaves nothing pending, not merely something inert: a
+    // renewal timer outliving teardown would keep the store reachable for hours.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(CREDENTIAL_LIFETIME_MS);
+    expect(clients).toHaveLength(1);
   });
 
   it("drops back to the gate when the client gives up (credential rejection)", () => {
