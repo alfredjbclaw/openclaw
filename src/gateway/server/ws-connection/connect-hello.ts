@@ -15,6 +15,7 @@ import {
 import { hasMultipleSessionSharingIdentities } from "../../../state/user-profiles.js";
 import { resolveRuntimeServiceBuildId, resolveRuntimeServiceVersion } from "../../../version.js";
 import { resolveChatAttachmentPolicy } from "../../chat-attachment-policy.js";
+import { issueControlUiDeviceCredential } from "../../control-ui-device-credential.js";
 import {
   listControlUiPluginTabs,
   listControlUiPluginWidgetKinds,
@@ -34,6 +35,7 @@ import { formatError } from "../../server-utils.js";
 import { allowedSessionVisibilities } from "../../session-sharing.js";
 import { formatForLog, logWs } from "../../ws-log.js";
 import { buildGatewaySnapshot, getHealthCache, getHealthVersion } from "../health-state.js";
+import { resolveSharedGatewaySessionGeneration } from "../ws-shared-generation.js";
 import { emitGatewayAuthSecurityEvent } from "./connect-auth-security.js";
 import type {
   DeviceAuthorizedGatewayConnect,
@@ -80,9 +82,25 @@ export async function sendGatewayHello(
     sessionSharedGatewaySessionGeneration,
     issuedBootstrapProfile,
     handoffBootstrapProfile,
+    controlUiPairingKind,
     deviceToken,
     bootstrapDeviceTokens,
   } = state;
+  // The Tailscale Serve lane skips pairing, so `ensureDeviceToken` has no row to
+  // bind and this browser leaves the handshake with nothing it can present on the
+  // Control UI's HTTP reads. Mint the device-bound credential here instead: the
+  // device proof is verified by now, and binding it to the shared-auth generation
+  // the HTTP side recomputes keeps a secret rotation from outliving it.
+  const controlUiDeviceCredential =
+    controlUiPairingKind === "tailscale-device" && device && !deviceToken
+      ? issueControlUiDeviceCredential({
+          deviceId: device.id,
+          authGeneration: resolveSharedGatewaySessionGeneration(
+            resolvedAuth,
+            context.configSnapshot.gateway?.trustedProxies,
+          ),
+        })
+      : null;
   // Prefer the authenticated human; principal scopes never inherit device-token rows.
   const authenticatedPrincipal = authenticatedUserProfileId ?? authResult.user;
   const recoveryScopeMaterial = authenticatedPrincipal
@@ -151,6 +169,12 @@ export async function sendGatewayHello(
       scopes,
       ...(recoveryScope ? { recoveryScope } : {}),
       ...(canMigrateRecovery ? { recoveryMigrationAllowed: true as const } : {}),
+      ...(controlUiDeviceCredential
+        ? {
+            httpCredential: controlUiDeviceCredential.credential,
+            httpCredentialExpiresAtMs: controlUiDeviceCredential.expiresAtMs,
+          }
+        : {}),
       ...(deviceToken
         ? {
             deviceToken: deviceToken.token,

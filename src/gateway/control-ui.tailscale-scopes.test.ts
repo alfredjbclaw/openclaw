@@ -1,9 +1,14 @@
 // Regression cover for the Control UI HTTP read surfaces over Tailscale Serve.
-// Verified tailnet identity may read the metadata-only bootstrap config without
-// a token (#67915) and may mint the source-scoped assistant-media ticket from a
-// same-origin dashboard fetch, but it is not paired-device authentication: it
-// must confer no operator authority, and it must never reach a route that
-// serves local media bytes without that minted ticket or a real credential.
+//
+// Verified tailnet identity is ambient: every request from this host carries it,
+// so it buys exactly one thing — the metadata-only bootstrap config read that
+// lets a tokenless dashboard boot far enough to open its websocket (#67915). It
+// confers no operator authority and mints no capability.
+//
+// Everything on the media route is device-bound instead. Once that websocket
+// connect authenticates, the Gateway hands the browser a credential bound to the
+// device that proved its keypair, and metadata, ticket minting, and bytes all
+// run off that credential or a real one.
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import os from "node:os";
@@ -17,12 +22,14 @@ import {
   CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
   type ControlUiPluginFrameGrantAck,
 } from "./control-ui-contract.js";
+import { issueControlUiDeviceCredential } from "./control-ui-device-credential.js";
 import {
   handleControlUiAssistantMediaRequest,
   handleControlUiAvatarRequest,
   handleControlUiHttpRequest,
 } from "./control-ui.js";
 import { markGatewayIngressTransport } from "./ingress-attribution.js";
+import { resolveSharedGatewaySessionGeneration } from "./server/ws-shared-generation.js";
 import { testTailscaleWhois } from "./test-helpers.runtime-state.js";
 import { makeMockHttpResponse } from "./test-http-response.js";
 
@@ -44,29 +51,104 @@ const TAILSCALE_AUTH: ResolvedGatewayAuth = {
 /**
  * A same-origin dashboard fetch arriving through managed Tailscale Serve with no
  * shared secret and no paired device token. The transport marking is what the
- * Serve listener applies; without it the forwarded headers are unattributable.
+ * Serve listener applies; without it the forwarded headers are unattributable,
+ * so `managedServe: false` models the same headers replayed off that ingress.
  */
 function tailscaleServeRequest(params: {
   url: string;
   headers?: IncomingMessage["headers"];
 }): IncomingMessage {
+  const headers = {
+    host: "gateway.local",
+    "x-forwarded-for": "100.64.0.1",
+    "x-forwarded-proto": "https",
+    "x-forwarded-host": "ai-hub.bone-egret.ts.net",
+    "tailscale-user-login": "peter@github",
+    "tailscale-user-name": "Peter",
+    "sec-fetch-site": "same-origin",
+    ...params.headers,
+  };
   const req = {
     url: params.url,
     method: "GET",
     socket: { remoteAddress: "127.0.0.1", localPort: 18_789 },
+    headers,
+    headersDistinct: Object.fromEntries(
+      Object.entries(headers).map(([name, value]) => [name, [String(value)]]),
+    ),
+  } as unknown as IncomingMessage;
+  markGatewayIngressTransport(req, { kind: "managed-tailscale", mode: "serve" });
+  return req;
+}
+
+/**
+ * A same-origin request reaching the Gateway's own port instead of the managed
+ * Serve listener — where a credential lifted off the dashboard would be replayed.
+ * Carries no tailnet headers, so it attributes cleanly as a direct remote client
+ * and any refusal is a real auth decision.
+ */
+function offServeIngressRequest(params: {
+  url: string;
+  headers?: IncomingMessage["headers"];
+}): IncomingMessage {
+  return {
+    url: params.url,
+    method: "GET",
+    socket: { remoteAddress: "192.168.1.50", localPort: 18_789 },
     headers: {
       host: "gateway.local",
-      "x-forwarded-for": "100.64.0.1",
-      "x-forwarded-proto": "https",
-      "x-forwarded-host": "ai-hub.bone-egret.ts.net",
-      "tailscale-user-login": "peter@github",
-      "tailscale-user-name": "Peter",
       "sec-fetch-site": "same-origin",
       ...params.headers,
     },
   } as unknown as IncomingMessage;
-  markGatewayIngressTransport(req, { kind: "managed-tailscale", mode: "serve" });
-  return req;
+}
+
+/** Tailnet-shaped headers set by a client that is not behind managed Serve. */
+function spoofedTailscaleHeaderRequest(url: string): IncomingMessage {
+  return offServeIngressRequest({
+    url,
+    headers: { "tailscale-user-login": "peter@github", "tailscale-user-name": "Peter" },
+  });
+}
+
+/**
+ * The credential the connect handshake hands a Serve dashboard once its
+ * websocket authenticates. Minted through the production issuer so this proves
+ * the HTTP side accepts exactly what hello-ok emits.
+ */
+function postConnectDeviceCredential(): string {
+  const issued = issueControlUiDeviceCredential({
+    deviceId: "device-tailscale-serve-dashboard",
+    authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
+  });
+  if (!issued) {
+    throw new Error("expected a device-bound Control UI credential");
+  }
+  return issued.credential;
+}
+
+async function withAssistantMediaFile<T>(
+  name: string,
+  fn: (filePath: string) => Promise<T>,
+): Promise<T> {
+  const mediaDir = path.join(resolveStateDir(), "media", name);
+  await fs.mkdir(mediaDir, { recursive: true });
+  const filePath = path.join(
+    mediaDir,
+    `media-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
+  );
+  await fs.writeFile(filePath, "tailscale serve attachment\n", "utf8");
+  try {
+    return await fn(filePath);
+  } finally {
+    await fs.rm(mediaDir, { recursive: true, force: true });
+  }
+}
+
+async function runAssistantMediaRequest(req: IncomingMessage) {
+  const { res, end, setHeader } = makeMockHttpResponse();
+  const handled = await handleControlUiAssistantMediaRequest(req, res, { auth: TAILSCALE_AUTH });
+  return { res, end, setHeader, handled };
 }
 
 /** Register one plugin tab that only an operator.admin caller may open. */
@@ -203,48 +285,85 @@ describe("control ui HTTP reads over Tailscale", () => {
     });
   });
 
-  it("mints a scoped assistant-media ticket for a same-origin Tailscale Serve read", async () => {
+  it("refuses an ambient assistant-media ticket mint over Tailscale Serve", async () => {
     testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
-    const mediaDir = path.join(resolveStateDir(), "media", "tailscale-scopes-mint");
-    await fs.mkdir(mediaDir, { recursive: true });
-    const filePath = path.join(
-      mediaDir,
-      `ticket-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`,
-    );
-    await fs.writeFile(filePath, "tailscale serve attachment\n", "utf8");
-    try {
-      const { res, end } = makeMockHttpResponse();
-      const handled = await handleControlUiAssistantMediaRequest(
+    await withAssistantMediaFile("tailscale-scopes-ambient-mint", async (filePath) => {
+      const { res, end, handled } = await runAssistantMediaRequest(
         tailscaleServeRequest({
           url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
         }),
-        res,
-        { auth: TAILSCALE_AUTH },
       );
 
       expect(handled).toBe(true);
-      expect(res.statusCode).toBe(200);
-      // The mint is the recovery: the source-scoped, short-lived ticket is the
-      // only way a tokenless Serve dashboard reaches the credential-bound byte
-      // read, and this metadata response serves no file bytes itself.
+      // Ambient tailnet identity reaches neither half of this route. The metadata
+      // read is a capability mint, so allowing it here would hand any same-origin
+      // page on the tailnet a byte-read ticket with no credential at all.
+      expect(res.statusCode).toBe(401);
       const body = readResponseBody(end);
-      expect(body).toContain('"available":true');
-      expect(body).toContain('"mediaTicket":"v1.');
-    } finally {
-      await fs.rm(mediaDir, { recursive: true, force: true });
-    }
+      expect(body).not.toContain("mediaTicket");
+      expect(body).not.toContain('"available"');
+    });
+  });
+
+  it("completes metadata to ticket to bytes for a post-connect device credential", async () => {
+    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
+    await withAssistantMediaFile("tailscale-scopes-device-bound", async (filePath) => {
+      const source = encodeURIComponent(filePath);
+      const meta = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${source}`,
+          headers: { authorization: `Bearer ${postConnectDeviceCredential()}` },
+        }),
+      );
+
+      expect(meta.handled).toBe(true);
+      expect(meta.res.statusCode).toBe(200);
+      const availability = JSON.parse(readResponseBody(meta.end)) as {
+        available?: boolean;
+        mediaTicket?: string;
+      };
+      expect(availability.available).toBe(true);
+      expect(availability.mediaTicket ?? "").toMatch(/^v1\./);
+
+      // The ticket the credential bought is what unlocks the bytes, so the whole
+      // recovered path is bound to a websocket connect that authenticated.
+      const bytes = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?source=${source}&mediaTicket=${encodeURIComponent(
+            availability.mediaTicket ?? "",
+          )}`,
+        }),
+      );
+      expect(bytes.handled).toBe(true);
+      expect(bytes.res.statusCode).toBe(200);
+    });
+  });
+
+  it("refuses a device credential replayed off the managed Serve ingress", async () => {
+    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
+    await withAssistantMediaFile("tailscale-scopes-off-ingress", async (filePath) => {
+      const { res, end, handled } = await runAssistantMediaRequest(
+        offServeIngressRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+          headers: { authorization: `Bearer ${postConnectDeviceCredential()}` },
+        }),
+      );
+
+      expect(handled).toBe(true);
+      // The credential is pinned to the ingress it was issued on: a copy lifted
+      // off that browser is worthless anywhere the tailnet does not reach.
+      expect(res.statusCode).toBe(401);
+      expect(readResponseBody(end)).not.toContain("mediaTicket");
+    });
   });
 
   it("still refuses a cross-site assistant-media ticket mint over Tailscale Serve", async () => {
     testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
-    const { res, end } = makeMockHttpResponse();
-    const handled = await handleControlUiAssistantMediaRequest(
+    const { res, end, handled } = await runAssistantMediaRequest(
       tailscaleServeRequest({
         url: "/__openclaw__/assistant-media?source=/etc/hosts&meta=1",
         headers: { "sec-fetch-site": "cross-site" },
       }),
-      res,
-      { auth: TAILSCALE_AUTH },
     );
 
     expect(handled).toBe(true);
@@ -254,15 +373,27 @@ describe("control ui HTTP reads over Tailscale", () => {
 
   it("refuses an assistant-media byte read for a device-less Tailscale browser", async () => {
     testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
-    const { res } = makeMockHttpResponse();
-    const handled = await handleControlUiAssistantMediaRequest(
+    const { res, handled } = await runAssistantMediaRequest(
       tailscaleServeRequest({ url: "/__openclaw__/assistant-media?source=/etc/hosts" }),
-      res,
-      { auth: TAILSCALE_AUTH },
     );
 
     expect(handled).toBe(true);
     expect(res.statusCode).toBe(401);
+  });
+
+  it("keeps the ambient bootstrap read scoped to managed Tailscale Serve ingress", async () => {
+    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
+    await withControlUiRoot(async (tmp) => {
+      const { res, end } = await runBootstrapConfigRequest({
+        rootPath: tmp,
+        req: spoofedTailscaleHeaderRequest(CONTROL_UI_BOOTSTRAP_CONFIG_PATH),
+      });
+      // Tailnet-shaped headers are attacker-supplied on any other ingress, so the
+      // request fails closed on attribution before identity is ever consulted:
+      // only the managed Serve listener's own marking makes those headers evidence.
+      expect(res.statusCode).toBe(403);
+      expect(readResponseBody(end)).toContain("proxy_attribution_required");
+    });
   });
 
   it("refuses an avatar read for a device-less Tailscale browser", async () => {

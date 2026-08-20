@@ -319,6 +319,47 @@ export function registerAuthModesSuite(): void {
       ws.close();
     });
 
+    /** Read one hello-ok auth field without asserting the payload's shape. */
+    const readHelloAuthField = (payload: Record<string, unknown> | undefined, field: string) => {
+      const auth = payload?.auth;
+      if (!auth || typeof auth !== "object") {
+        return undefined;
+      }
+      return Object.entries(auth).find(([key]) => key === field)?.[1];
+    };
+
+    test("hands the tailscale control ui a device-bound credential for its HTTP reads", async () => {
+      const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
+      const res = await connectReq(ws, {
+        skipDefaultAuth: true,
+        client: { ...CONTROL_UI_CLIENT },
+      });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      // This lane skips pairing, so there is no paired row to bind a device token
+      // to. Without the credential below the dashboard leaves the handshake unable
+      // to authenticate any Control UI HTTP read, which is what forced the
+      // ambient ticket-minting path this connect replaces.
+      expect(readHelloAuthField(res.payload, "deviceToken")).toBeUndefined();
+      expect(String(readHelloAuthField(res.payload, "httpCredential") ?? "")).toMatch(/^v1\./);
+      expect(
+        Number(readHelloAuthField(res.payload, "httpCredentialExpiresAtMs") ?? 0),
+      ).toBeGreaterThan(Date.now());
+      ws.close();
+    });
+
+    test("issues no device-bound credential when shared-secret auth carries the connect", async () => {
+      const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
+      const res = await connectReq(ws, {
+        token: "secret",
+        client: { ...CONTROL_UI_CLIENT },
+      });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      // Shared-secret connects pair normally and get a device token; minting the
+      // Serve credential there would widen it past the lane that needs it.
+      expect(readHelloAuthField(res.payload, "httpCredential")).toBeUndefined();
+      ws.close();
+    });
+
     test("connects with shared token but clears scopes when tailscale auth skips device", async () => {
       const ws = await openTailscaleWs(tailscaleEndpoint);
       const res = await connectReq(ws, { token: "secret", device: null });

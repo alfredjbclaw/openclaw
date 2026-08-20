@@ -2,8 +2,11 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 
-type ControlUiAuthSource = {
-  hello?: { auth?: { deviceToken?: string | null } | null } | null;
+/** Every source a Control UI HTTP credential can come from, in one shape. */
+export type ControlUiAuthSource = {
+  hello?: {
+    auth?: { deviceToken?: string | null; httpCredential?: string | null } | null;
+  } | null;
   settings?: { token?: string | null } | null;
   password?: string | null;
 };
@@ -22,9 +25,13 @@ function sanitizeHeaderToken(value: string | null): string | null {
   return /[\r\n]/.test(value) ? null : value;
 }
 
+// `httpCredential` is the Gateway's answer for sessions that authenticate on a
+// lane issuing no device token (Control UI over Tailscale Serve). It ranks below
+// the device token so a paired browser keeps presenting its durable credential.
 export function resolveControlUiAuthToken(source: ControlUiAuthSource): string | null {
   return (
     sanitizeHeaderToken(normalizeOptionalString(source.hello?.auth?.deviceToken) ?? null) ??
+    sanitizeHeaderToken(normalizeOptionalString(source.hello?.auth?.httpCredential) ?? null) ??
     sanitizeHeaderToken(normalizeOptionalString(source.settings?.token) ?? null) ??
     sanitizeHeaderToken(normalizeOptionalString(source.password) ?? null) ??
     null
@@ -44,6 +51,7 @@ export function resolveControlUiAuthCandidates(source: ControlUiAuthSource): str
   return uniqueStrings(
     [
       normalizeOptionalString(source.hello?.auth?.deviceToken),
+      normalizeOptionalString(source.hello?.auth?.httpCredential),
       normalizeOptionalString(source.settings?.token),
       normalizeOptionalString(source.password),
     ].flatMap((raw) => sanitizeHeaderToken(raw ?? null) ?? []),

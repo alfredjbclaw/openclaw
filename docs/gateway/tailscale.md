@@ -102,13 +102,34 @@ This tokenless flow assumes the gateway host is trusted. If untrusted local code
 
 Scope of the bypass:
 
-- Applies to the Control UI WebSocket auth surface, read-only `GET`/`HEAD` requests for Control UI profile avatars, the Control UI bootstrap config read (`/control-ui-config.json`), and the assistant-media metadata read (`meta=1`). The bootstrap and metadata reads are included because a device that connects over Serve skips pairing and therefore never receives a device token, leaving the browser with no HTTP credential at all; those reads return metadata only — the metadata read also mints the short-lived, source-scoped ticket the dashboard uses to fetch attachment bytes.
+- Applies to the Control UI WebSocket auth surface, read-only `GET`/`HEAD` requests for Control UI profile avatars, and the Control UI bootstrap config read (`/control-ui-config.json`). The bootstrap read is included because a device that connects over Serve skips pairing and therefore never receives a device token, leaving the browser with no HTTP credential to boot with; it returns dashboard metadata only.
 - On those HTTP read surfaces, ambient identity requires same-origin browser evidence: a request carrying a browser `Origin` must pass the Control UI browser-origin policy (same-origin with the request host, or an entry in `gateway.controlUi.allowedOrigins` — wildcard entries never grant ambient identity), and a request without `Origin` is accepted only when Fetch Metadata reports `Sec-Fetch-Site: same-origin`. Cross-site pages and non-browser clients cannot ride the ambient Tailscale identity; explicit token auth still works for them.
 - Ambient Tailscale identity is not paired-device authentication and confers no operator authority beyond read access: the bootstrap read grants no operator scopes beyond `operator.read`, projects no plugin frames, sets no plugin auth cookie, and a self-asserted `x-openclaw-scopes` header is ignored.
-- The Control UI routes that serve local file bytes are excluded. Assistant-media byte reads require the minted source-scoped media ticket, a gateway token, trusted-proxy identity, or a paired device token; Control UI avatar reads accept only those real credentials.
+- Ambient identity mints no capability. Assistant-media metadata, media-ticket minting, and media byte reads are device-bound instead: they require a gateway token, trusted-proxy identity, a paired device token, or the device-bound HTTP credential described below. Control UI avatar reads accept only those real credentials.
 - Other HTTP API endpoints (`/v1/*`, `/tools/invoke`, `/api/channels/*`, etc.) never use Tailscale identity-header auth; they always follow the gateway's normal HTTP auth mode.
 - For Control UI operator sessions that already carry browser device identity, a verified Tailscale identity skips the bootstrap-token/QR pairing round trip.
 - It does not bypass device identity itself: device-less clients are still rejected, and node-role connections still go through normal pairing and auth checks.
+
+### Device-bound HTTP credential
+
+Because the Serve lane skips pairing, the browser holds no paired-device token for
+its later HTTP reads. The gateway closes that gap on the WebSocket handshake
+instead of widening ambient identity: once the connect authenticates and the
+device proves its keypair, `hello-ok` carries a short-lived credential bound to
+that device, and the Control UI presents it as a bearer token on Control UI read
+routes. The credential:
+
+- is issued only after an authenticated Control UI connect on this lane — a
+  request that never completed that handshake cannot obtain one;
+- carries `operator.read` and nothing else, and never trusts `x-openclaw-scopes`;
+- is accepted only on requests arriving through the managed Tailscale Serve
+  listener, so a copy lifted off the browser is useless elsewhere;
+- expires on its own, is invalidated by a gateway restart, and stops verifying
+  when `gateway.auth.token`/`password` rotates.
+
+The dashboard's flow is therefore: bootstrap config (ambient) → WebSocket connect
+(authenticated) → device-bound credential → assistant-media metadata → media
+ticket → bytes.
 
 ### Externally managed Serve and Funnel
 

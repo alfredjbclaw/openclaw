@@ -131,6 +131,11 @@ export const HelloOkSchema = closedObject({
   pluginSurfaceUrls: Type.Optional(Type.Record(NonEmptyString, NonEmptyString)),
   auth: closedObject({
     deviceToken: Type.Optional(NonEmptyString),
+    // Additive: device-bound HTTP credential for Control UI read routes, issued
+    // when this connect authenticated on a lane that mints no paired-device token.
+    // Not a device token — it never authenticates a websocket connect.
+    httpCredential: Type.Optional(NonEmptyString),
+    httpCredentialExpiresAtMs: Type.Optional(Type.Integer({ minimum: 0 })),
     recoveryMigrationAllowed: Type.Optional(Type.Literal(true)),
     recoveryScope: Type.Optional(NonEmptyString),
     role: NonEmptyString,
