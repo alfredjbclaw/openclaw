@@ -13,12 +13,16 @@
 // verified principal, so the credential does not travel between tailnet users.
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { resolveStateDir } from "../config/paths.js";
+import { approveDevicePairing } from "../infra/device-pairing-approval.js";
+import { ensureDeviceToken } from "../infra/device-pairing-tokens.js";
+import { requestDevicePairing } from "../infra/device-pairing.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
+import { withEnvAsync } from "../test-utils/env.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import {
   CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
@@ -34,6 +38,7 @@ import {
   handleControlUiHttpRequest,
 } from "./control-ui.js";
 import { markGatewayIngressTransport } from "./ingress-attribution.js";
+import { READ_SCOPE as CONTROL_UI_READ_SCOPE } from "./operator-scopes.js";
 import { resolveSharedGatewaySessionGeneration } from "./server/ws-shared-generation.js";
 import { testTailscaleWhois } from "./test-helpers.runtime-state.js";
 import { makeMockHttpResponse } from "./test-http-response.js";
@@ -47,11 +52,22 @@ vi.mock("../infra/tailscale.js", async () => {
   };
 });
 
+const testTempDirs = useAutoCleanupTempDirTracker(afterEach);
+
 const TAILSCALE_AUTH: ResolvedGatewayAuth = {
   mode: "token",
   token: "shared-token",
   allowTailscale: true,
 };
+
+/**
+ * The same resolved auth after an operator sets `gateway.auth.allowTailscale:
+ * false`. Only the flag differs, so the shared secret — and therefore the
+ * session generation credentials are stamped with — is untouched: nothing
+ * rotates or revokes an outstanding credential on this flip, which is why
+ * redemption has to consult the flag itself.
+ */
+const TAILSCALE_DISABLED_AUTH: ResolvedGatewayAuth = { ...TAILSCALE_AUTH, allowTailscale: false };
 
 /** The tailnet user whose browser completed the connect that minted a credential. */
 const DASHBOARD_PRINCIPAL = "peter@github";
@@ -189,10 +205,47 @@ async function withAssistantMediaFile<T>(
   }
 }
 
-async function runAssistantMediaRequest(req: IncomingMessage) {
+async function runAssistantMediaRequest(
+  req: IncomingMessage,
+  auth: ResolvedGatewayAuth = TAILSCALE_AUTH,
+) {
   const { res, end, setHeader } = makeMockHttpResponse();
-  const handled = await handleControlUiAssistantMediaRequest(req, res, { auth: TAILSCALE_AUTH });
+  const handled = await handleControlUiAssistantMediaRequest(req, res, { auth });
   return { res, end, setHeader, handled };
+}
+
+/**
+ * A paired Control UI browser device holding an ordinary operator token, issued
+ * under the same shared-gateway generation the Serve credential carries.
+ */
+async function withPairedControlUiDeviceToken<T>(fn: (operatorToken: string) => Promise<T>) {
+  const tempHome = testTempDirs.make("openclaw-ts-scopes-device-");
+  return await withEnvAsync({ OPENCLAW_HOME: tempHome }, async () => {
+    const deviceId = "control-ui-paired-browser";
+    const requested = await requestDevicePairing({
+      deviceId,
+      publicKey: "test-public-key",
+      role: "operator",
+      scopes: [CONTROL_UI_READ_SCOPE],
+      clientId: "openclaw-control-ui",
+      clientMode: "webchat",
+    });
+    const approved = await approveDevicePairing(requested.request.requestId, {
+      callerScopes: [CONTROL_UI_READ_SCOPE],
+    });
+    expect(approved?.status).toBe("approved");
+    const issued = await ensureDeviceToken({
+      deviceId,
+      role: "operator",
+      scopes: [CONTROL_UI_READ_SCOPE],
+      issuer: {
+        kind: "shared-gateway-auth",
+        generation: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH) ?? "",
+      },
+    });
+    expect(typeof issued?.token).toBe("string");
+    return await fn(issued?.token ?? "");
+  });
 }
 
 /** Register one plugin tab that only an operator.admin caller may open. */
@@ -221,13 +274,9 @@ function registerAdminOnlyPluginTab(): void {
 }
 
 async function withControlUiRoot<T>(fn: (tmp: string) => Promise<T>): Promise<T> {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-ui-ts-scopes-"));
-  try {
-    await fs.writeFile(path.join(tmp, "index.html"), "<html></html>\n");
-    return await fn(tmp);
-  } finally {
-    await fs.rm(tmp, { recursive: true, force: true });
-  }
+  const tmp = testTempDirs.make("openclaw-ui-ts-scopes-");
+  await fs.writeFile(path.join(tmp, "index.html"), "<html></html>\n");
+  return await fn(tmp);
 }
 
 async function runBootstrapConfigRequest(params: { rootPath: string; req: IncomingMessage }) {
@@ -420,6 +469,65 @@ describe("control ui HTTP reads over Tailscale", () => {
       expect(handled).toBe(true);
       expect(res.statusCode).toBe(200);
       expect((JSON.parse(readResponseBody(end)) as { available?: boolean }).available).toBe(true);
+    });
+  });
+
+  it("refuses a credential minted before the operator disabled allowTailscale", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    // Minted while the lane was on, exactly as a live connect would have.
+    const credential = postConnectDeviceCredential();
+    // Nothing about the flip rotates the generation the credential is stamped
+    // with, so the refusal below cannot be an accident of a stale signature —
+    // the flag itself is the only thing that changed.
+    expect(resolveSharedGatewaySessionGeneration(TAILSCALE_DISABLED_AUTH)).toBe(
+      resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
+    );
+
+    await withAssistantMediaFile("tailscale-scopes-allow-flag-flip", async (filePath) => {
+      const url = `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`;
+      const headers = { authorization: `Bearer ${credential}` };
+
+      const allowed = await runAssistantMediaRequest(
+        tailscaleServeRequest({ url, headers }),
+        TAILSCALE_AUTH,
+      );
+      expect(allowed.res.statusCode).toBe(200);
+      expect((JSON.parse(readResponseBody(allowed.end)) as { available?: boolean }).available).toBe(
+        true,
+      );
+
+      const refused = await runAssistantMediaRequest(
+        tailscaleServeRequest({ url, headers }),
+        TAILSCALE_DISABLED_AUTH,
+      );
+      // Ambient bootstrap reads stop the moment the flag goes off. A credential
+      // minted out of that same lane has to stop with them, not run out its 12h
+      // TTL against an operator who has already turned the lane off.
+      expect(refused.handled).toBe(true);
+      expect(refused.res.statusCode).toBe(401);
+      expect(readResponseBody(refused.end)).not.toContain("mediaTicket");
+    });
+  });
+
+  it("keeps a paired device token working on Serve ingress when allowTailscale is off", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    await withPairedControlUiDeviceToken(async (operatorToken) => {
+      await withAssistantMediaFile("tailscale-scopes-paired-device-flip", async (filePath) => {
+        const url = `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`;
+        const headers = { authorization: `Bearer ${operatorToken}` };
+
+        // Gating redemption narrows the Serve credential only. A paired device
+        // authenticated its own keypair and never depended on the Tailscale lane,
+        // so it keeps its ingress-agnostic reach on both sides of the flip.
+        for (const auth of [TAILSCALE_AUTH, TAILSCALE_DISABLED_AUTH]) {
+          const { res, handled } = await runAssistantMediaRequest(
+            tailscaleServeRequest({ url, headers }),
+            auth,
+          );
+          expect(handled).toBe(true);
+          expect(res.statusCode, `allowTailscale: ${auth.allowTailscale}`).toBe(200);
+        }
+      });
     });
   });
 

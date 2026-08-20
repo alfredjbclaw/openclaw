@@ -287,9 +287,16 @@ export async function authorizeControlUiReadRequestOrReply(
         // The post-connect credential is redeemable only on the managed-Serve
         // ingress and only by the tailnet principal it was minted for, which the
         // verifier re-resolves from this request's own whois-checked identity.
-        // Paired-device tokens keep their existing ingress-agnostic reach.
+        // Redemption re-reads `allowTailscale` for the same reason the bootstrap
+        // path does (`auth.ts`): nothing rotates an outstanding credential when
+        // that flag flips, so without this an operator who turns the Tailscale
+        // lane off would still be serving credential-bearing reads for the rest
+        // of the 12h TTL while ambient reads had already stopped. Falling through
+        // leaves paired-device tokens their existing ingress-agnostic reach.
         const serveIngress =
-          ingressAttribution.kind === "tailscale-serve" ? ingressAttribution : null;
+          auth.allowTailscale && ingressAttribution.kind === "tailscale-serve"
+            ? ingressAttribution
+            : null;
         const verifiedScopes =
           (serveIngress
             ? await verifyControlUiDeviceCredential({
