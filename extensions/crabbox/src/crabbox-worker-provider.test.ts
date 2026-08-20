@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { WorkerProfile, WorkerProvider } from "openclaw/plugin-sdk/plugin-entry";
+import {
+  type WorkerProfile,
+  type WorkerProvider,
+  WorkerProviderError,
+} from "openclaw/plugin-sdk/plugin-entry";
 import * as processRuntime from "openclaw/plugin-sdk/process-runtime";
 import type { SpawnResult } from "openclaw/plugin-sdk/process-runtime";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
@@ -333,10 +337,10 @@ describe("Crabbox worker provider", () => {
       name: "wrong PNG dimensions",
       bytes: (() => {
         const bytes = fs.readFileSync(WORKER_WALLPAPER_PATH);
-        bytes.writeUInt32BE(1919, 16);
+        bytes.writeUInt32BE(1023, 16);
         return bytes;
       })(),
-      message: "Crabbox worker wallpaper must be 1920x1080; got 1919x1080",
+      message: "Crabbox worker wallpaper must be 1024x576; got 1023x576",
     },
   ])("rejects $name during provider registration", ({ bytes, message }) => {
     const tempDir = tempDirs.make("openclaw-crabbox-wallpaper-");
@@ -420,6 +424,32 @@ describe("Crabbox worker provider", () => {
     expect(desktopSetupText).not.toContain("/var/lib/crabbox/browser.env");
     expect(desktopSetupLines).not.toContain("export DISPLAY");
     expect(desktopSetupText).toContain(
+      'mapfile -t renderer_pids < <(pgrep -u "$worker_uid" -x xfdesktop || true)',
+    );
+    expect(desktopSetupText).toContain("Expected exactly one worker-owned XFCE desktop renderer");
+    expect(desktopSetupText).toContain('renderer_pid="${renderer_pids[0]}"');
+    expect(desktopSetupText).toContain('exec 8<"/proc/$renderer_pid/environ"');
+    for (const [name, target] of [
+      ["DISPLAY", "renderer_display"],
+      ["DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_ADDRESS"],
+      ["SESSION_MANAGER", "SESSION_MANAGER"],
+      ["XDG_RUNTIME_DIR", "XDG_RUNTIME_DIR"],
+    ]) {
+      expect(desktopSetupText).toContain(`${name}=*) ${target}="\${process_variable#*=}"`);
+    }
+    expect(desktopSetupText).toContain('[ "$renderer_display" = ":99" ]');
+    expect(desktopSetupText).toContain(
+      '[ -n "$DBUS_SESSION_BUS_ADDRESS" ] && [ -n "$SESSION_MANAGER" ]',
+    );
+    expect(desktopSetupText).toContain(
+      'case "${XDG_RUNTIME_DIR:-}" in ""|/*) ;; *) echo "XFCE desktop renderer has an invalid XDG_RUNTIME_DIR"',
+    );
+    expect(desktopSetupText).toContain("export DBUS_SESSION_BUS_ADDRESS SESSION_MANAGER");
+    expect(desktopSetupText).toContain('[ -z "${XDG_RUNTIME_DIR:-}" ] || export XDG_RUNTIME_DIR');
+    expect(desktopSetupText).not.toMatch(/(?:^|\n)\s*(?:\.|source)\s+[^\n]*\/proc\//u);
+    expect(desktopSetupText).not.toMatch(/(?:^|\n)\s*eval(?:\s|$)/u);
+    expect(desktopSetupText).not.toMatch(/(?:^|\n)\s*(?:\.|source)\s+[^\n]*\.env/u);
+    expect(desktopSetupText).toContain(
       "nohup /usr/local/bin/crabbox-browser --remote-debugging-address=127.0.0.1",
     );
     expect(desktopSetupText).toMatch(/for required_command in [^\n;]*python3[^\n;]*; do/u);
@@ -440,12 +470,34 @@ describe("Crabbox worker provider", () => {
       'wallpaper_path="$worker_home/.local/share/backgrounds/openclaw-worker.png"',
     );
     expect(desktopSetupText).toContain('for backdrop in "${backdrop_roots[@]}"; do');
+    const sessionExportIndex = desktopSetupText.indexOf(
+      "export DBUS_SESSION_BUS_ADDRESS SESSION_MANAGER",
+    );
+    const sessionExtractionIndex = desktopSetupText.indexOf(
+      'DBUS_SESSION_BUS_ADDRESS=*) DBUS_SESSION_BUS_ADDRESS="${process_variable#*=}"',
+    );
+    const firstXfconfIndex = desktopSetupText.indexOf("xfconf-query -c xfce4-desktop");
+    const xrandrIndex = desktopSetupText.indexOf("xrandr --listmonitors");
     const lastImageIndex = desktopSetupText.indexOf('-p "$backdrop/last-image"');
-    const stopRendererIndex = desktopSetupText.indexOf("pkill -TERM -x xfdesktop");
-    const startRendererIndex = desktopSetupText.indexOf("nohup xfdesktop");
+    const saveRendererIndex = desktopSetupText.indexOf(
+      'renderer_pid_before_reload="$renderer_pid"',
+    );
+    const reloadRendererIndex = desktopSetupText.indexOf("xfdesktop --reload");
+    const verifyRendererIndex = desktopSetupText.indexOf(
+      '[ "$renderer_pid" = "$renderer_pid_before_reload" ]',
+    );
+    expect(sessionExtractionIndex).toBeGreaterThan(-1);
+    expect(sessionExportIndex).toBeGreaterThan(sessionExtractionIndex);
+    expect(sessionExportIndex).toBeGreaterThan(-1);
+    expect(firstXfconfIndex).toBeGreaterThan(sessionExportIndex);
+    expect(xrandrIndex).toBeGreaterThan(sessionExportIndex);
     expect(lastImageIndex).toBeGreaterThan(-1);
-    expect(stopRendererIndex).toBeGreaterThan(lastImageIndex);
-    expect(startRendererIndex).toBeGreaterThan(stopRendererIndex);
+    expect(saveRendererIndex).toBeGreaterThan(lastImageIndex);
+    expect(reloadRendererIndex).toBeGreaterThan(saveRendererIndex);
+    expect(verifyRendererIndex).toBeGreaterThan(reloadRendererIndex);
+    expect(desktopSetupLines.filter((line) => line === "bind_xfdesktop_session")).toHaveLength(2);
+    expect(desktopSetupText).not.toMatch(/pkill[^\n]*xfdesktop/u);
+    expect(desktopSetupText).not.toContain("nohup xfdesktop");
     expect(desktopSetupText).not.toContain("def ellipse");
     expect(desktopSetupText).not.toContain("import struct");
     expect(desktopSetupText).not.toContain(".svg");
@@ -663,6 +715,39 @@ describe("Crabbox worker provider", () => {
     expect(calls.some((argv) => argv[1] === "stop" && argv.includes(LEASE_ID))).toBe(true);
   });
 
+  it("preserves the allocated lease and both failures when setup cleanup times out", async () => {
+    let releaseCommitted = false;
+    const provider = providerWithRunner(async (argv) => {
+      if (argv[1] === "inspect") {
+        return commandResult({ stdout: inspectJson({ sshHostKey: HOST_KEY }) });
+      }
+      if (argv[1] === "run") {
+        return commandResult({ code: 7, stderr: "node setup failed" });
+      }
+      if (argv[1] === "stop") {
+        releaseCommitted = true;
+        return commandResult({ code: null, killed: true, termination: "timeout" });
+      }
+      return commandResult();
+    });
+
+    const error = await provider
+      .provision({ ...PROFILE, setup: "install-node" }, OPERATION_ID)
+      .catch((cause: unknown) => cause);
+
+    expect(WorkerProviderError.isCleanupIndeterminate(error)).toBe(true);
+    if (!WorkerProviderError.isCleanupIndeterminate(error)) {
+      throw new Error("expected indeterminate worker cleanup error");
+    }
+    expect(error).toMatchObject({
+      leaseId: LEASE_ID,
+      provisionError: { message: expect.stringContaining("node setup failed") },
+      cleanupError: { message: expect.stringContaining("stop did not exit normally (timeout)") },
+    });
+    expect(error.errors).toEqual([error.provisionError, error.cleanupError]);
+    expect(releaseCommitted).toBe(true);
+  });
+
   it("stops the lease when the profile setup command cannot start", async () => {
     const calls: string[][] = [];
     let warmed = false;
@@ -875,10 +960,24 @@ describe("Crabbox worker provider", () => {
         .catch((cause: unknown) => cause);
       expect(error).toBeInstanceOf(Error);
       expect(error).not.toMatchObject({ code: "invalid_profile" });
-      const message = error instanceof Error ? error.message : "";
-      expect(message).toContain(`cleanup is indeterminate during ${failurePoint}`);
-      expect(message).toContain("Crabbox AWS instance profile must be empty for cloud workers");
-      expect(message.length).toBeLessThanOrEqual(512);
+      if (failurePoint === "stop") {
+        expect(WorkerProviderError.isCleanupIndeterminate(error)).toBe(true);
+        if (!WorkerProviderError.isCleanupIndeterminate(error)) {
+          throw new Error("expected indeterminate worker cleanup error");
+        }
+        expect(error).toMatchObject({
+          leaseId: LEASE_ID,
+          provisionError: {
+            message: "Crabbox AWS instance profile must be empty for cloud workers",
+          },
+          cleanupError: { message: expect.stringContaining("stop did not exit normally") },
+        });
+      } else {
+        const message = error instanceof Error ? error.message : "";
+        expect(message).toContain("cleanup is indeterminate during inspect");
+        expect(message).toContain("Crabbox AWS instance profile must be empty for cloud workers");
+        expect(message.length).toBeLessThanOrEqual(512);
+      }
       expect(live).toBe(true);
       expect(calls.map((argv) => argv[1])).toEqual(
         failurePoint === "inspect" ? ["config", "inspect"] : ["config", "inspect", "stop"],
