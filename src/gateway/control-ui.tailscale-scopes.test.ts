@@ -7,8 +7,10 @@
 //
 // Everything on the media route is device-bound instead. Once that websocket
 // connect authenticates, the Gateway hands the browser a credential bound to the
-// device that proved its keypair, and metadata, ticket minting, and bytes all
-// run off that credential or a real one.
+// device that proved its keypair *and* to the verified tailnet principal that
+// connect ran as, and metadata, ticket minting, and bytes all run off that
+// credential or a real one. Redemption re-resolves the presenting request's own
+// verified principal, so the credential does not travel between tailnet users.
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import os from "node:os";
@@ -22,7 +24,10 @@ import {
   CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
   type ControlUiPluginFrameGrantAck,
 } from "./control-ui-contract.js";
-import { issueControlUiDeviceCredential } from "./control-ui-device-credential.js";
+import {
+  issueControlUiDeviceCredential,
+  issueUnboundControlUiDeviceCredentialForTest,
+} from "./control-ui-device-credential.js";
 import {
   handleControlUiAssistantMediaRequest,
   handleControlUiAvatarRequest,
@@ -48,6 +53,11 @@ const TAILSCALE_AUTH: ResolvedGatewayAuth = {
   allowTailscale: true,
 };
 
+/** The tailnet user whose browser completed the connect that minted a credential. */
+const DASHBOARD_PRINCIPAL = "peter@github";
+/** A second tailnet user reaching the same managed Serve ingress. */
+const OTHER_PRINCIPAL = "quinn@github";
+
 /**
  * A same-origin dashboard fetch arriving through managed Tailscale Serve with no
  * shared secret and no paired device token. The transport marking is what the
@@ -63,7 +73,7 @@ function tailscaleServeRequest(params: {
     "x-forwarded-for": "100.64.0.1",
     "x-forwarded-proto": "https",
     "x-forwarded-host": "ai-hub.bone-egret.ts.net",
-    "tailscale-user-login": "peter@github",
+    "tailscale-user-login": DASHBOARD_PRINCIPAL,
     "tailscale-user-name": "Peter",
     "sec-fetch-site": "same-origin",
     ...params.headers,
@@ -114,17 +124,31 @@ function spoofedTailscaleHeaderRequest(url: string): IncomingMessage {
 /**
  * The credential the connect handshake hands a Serve dashboard once its
  * websocket authenticates. Minted through the production issuer so this proves
- * the HTTP side accepts exactly what hello-ok emits.
+ * the HTTP side accepts exactly what hello-ok emits, for the tailnet principal
+ * that connect authenticated as.
  */
-function postConnectDeviceCredential(): string {
+function postConnectDeviceCredential(principal = DASHBOARD_PRINCIPAL): string {
   const issued = issueControlUiDeviceCredential({
     deviceId: "device-tailscale-serve-dashboard",
+    principal,
     authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
   });
   if (!issued) {
     throw new Error("expected a device-bound Control UI credential");
   }
   return issued.credential;
+}
+
+/** The shape this credential carried before it was bound to a principal. */
+function unboundDeviceCredential(): string {
+  const token = issueUnboundControlUiDeviceCredentialForTest({
+    deviceId: "device-tailscale-serve-dashboard",
+    authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
+  });
+  if (!token) {
+    throw new Error("expected an unbound Control UI credential");
+  }
+  return token;
 }
 
 async function withAssistantMediaFile<T>(
@@ -352,6 +376,68 @@ describe("control ui HTTP reads over Tailscale", () => {
       expect(handled).toBe(true);
       // The credential is pinned to the ingress it was issued on: a copy lifted
       // off that browser is worthless anywhere the tailnet does not reach.
+      expect(res.statusCode).toBe(401);
+      expect(readResponseBody(end)).not.toContain("mediaTicket");
+    });
+  });
+
+  it("refuses a device credential presented by a different verified tailnet principal", async () => {
+    const credential = postConnectDeviceCredential(DASHBOARD_PRINCIPAL);
+    // A second tailnet user reaching the same managed Serve ingress, with their
+    // own whois-verified identity, replays the first user's credential.
+    testTailscaleWhois.value = { login: OTHER_PRINCIPAL, name: "Quinn" };
+    await withAssistantMediaFile("tailscale-scopes-cross-principal", async (filePath) => {
+      const { res, end, handled } = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+          headers: {
+            authorization: `Bearer ${credential}`,
+            "tailscale-user-login": OTHER_PRINCIPAL,
+            "tailscale-user-name": "Quinn",
+          },
+        }),
+      );
+
+      expect(handled).toBe(true);
+      // Managed-Serve ingress is a class, not a principal: without this check the
+      // credential would spend its full TTL for anyone else on the tailnet.
+      expect(res.statusCode).toBe(401);
+      expect(readResponseBody(end)).not.toContain("mediaTicket");
+    });
+  });
+
+  it("refuses a device credential when the presenting request has no verifiable identity", async () => {
+    const credential = postConnectDeviceCredential();
+    // The forwarded login header is present but whois does not corroborate it,
+    // so there is no verified principal to compare the credential's claim to.
+    testTailscaleWhois.value = null;
+    await withAssistantMediaFile("tailscale-scopes-unverified-principal", async (filePath) => {
+      const { res, end, handled } = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+          headers: { authorization: `Bearer ${credential}` },
+        }),
+      );
+
+      expect(handled).toBe(true);
+      expect(res.statusCode).toBe(401);
+      expect(readResponseBody(end)).not.toContain("mediaTicket");
+    });
+  });
+
+  it("refuses a device credential that carries no principal claim", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    await withAssistantMediaFile("tailscale-scopes-unbound-credential", async (filePath) => {
+      const { res, end, handled } = await runAssistantMediaRequest(
+        tailscaleServeRequest({
+          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
+          headers: { authorization: `Bearer ${unboundDeviceCredential()}` },
+        }),
+      );
+
+      expect(handled).toBe(true);
+      // Same ingress, same verified principal the credential was minted under —
+      // it still fails, because an absent claim is a rejection and not a default.
       expect(res.statusCode).toBe(401);
       expect(readResponseBody(end)).not.toContain("mediaTicket");
     });

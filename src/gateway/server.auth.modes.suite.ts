@@ -328,6 +328,15 @@ export function registerAuthModesSuite(): void {
       return Object.entries(auth).find(([key]) => key === field)?.[1];
     };
 
+    /** Read one claim out of a `v1.<payload>.<sig>` Control UI credential. */
+    const readCredentialClaim = (credential: string, claim: string) => {
+      const payload = credential.split(".")[1] ?? "";
+      const claims: Record<string, unknown> = JSON.parse(
+        Buffer.from(payload, "base64url").toString("utf8"),
+      );
+      return claims[claim];
+    };
+
     test("hands the tailscale control ui a device-bound credential for its HTTP reads", async () => {
       const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
       const res = await connectReq(ws, {
@@ -340,10 +349,15 @@ export function registerAuthModesSuite(): void {
       // to authenticate any Control UI HTTP read, which is what forced the
       // ambient ticket-minting path this connect replaces.
       expect(readHelloAuthField(res.payload, "deviceToken")).toBeUndefined();
-      expect(String(readHelloAuthField(res.payload, "httpCredential") ?? "")).toMatch(/^v1\./);
+      const credential = String(readHelloAuthField(res.payload, "httpCredential") ?? "");
+      expect(credential).toMatch(/^v1\./);
       expect(
         Number(readHelloAuthField(res.payload, "httpCredentialExpiresAtMs") ?? 0),
       ).toBeGreaterThan(Date.now());
+      // Issuance binds the credential to the whois-verified tailnet principal
+      // this connect ran as, which is what redemption re-checks. Without a
+      // principal to bind, no credential is minted at all.
+      expect(readCredentialClaim(credential, "principal")).toBe("peter");
       ws.close();
     });
 

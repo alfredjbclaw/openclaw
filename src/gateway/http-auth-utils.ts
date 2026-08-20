@@ -284,12 +284,19 @@ export async function authorizeControlUiReadRequestOrReply(
           retryAfterMs: deviceRateCheck.retryAfterMs,
         };
       } else {
-        // The post-connect credential is pinned to the managed-Serve ingress it
-        // was issued on, so a copy lifted off that browser buys nothing anywhere
-        // else. Paired-device tokens keep their existing ingress-agnostic reach.
+        // The post-connect credential is redeemable only on the managed-Serve
+        // ingress and only by the tailnet principal it was minted for, which the
+        // verifier re-resolves from this request's own whois-checked identity.
+        // Paired-device tokens keep their existing ingress-agnostic reach.
+        const serveIngress =
+          ingressAttribution.kind === "tailscale-serve" ? ingressAttribution : null;
         const verifiedScopes =
-          (ingressAttribution.kind === "tailscale-serve"
-            ? verifyControlUiDeviceCredential({ credential: token, authGeneration })
+          (serveIngress
+            ? await verifyControlUiDeviceCredential({
+                credential: token,
+                authGeneration,
+                resolvePresentedPrincipal: async () => (await serveIngress.verifyIdentity())?.login,
+              })
             : null) ?? (await verifyControlUiDeviceReadToken(token, authGeneration));
         if (verifiedScopes) {
           deviceScopes = verifiedScopes;

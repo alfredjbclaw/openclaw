@@ -88,13 +88,28 @@ export async function sendGatewayHello(
   } = state;
   // The Tailscale Serve lane skips pairing, so `ensureDeviceToken` has no row to
   // bind and this browser leaves the handshake with nothing it can present on the
-  // Control UI's HTTP reads. Mint the device-bound credential here instead: the
-  // device proof is verified by now, and binding it to the shared-auth generation
-  // the HTTP side recomputes keeps a secret rotation from outliving it.
+  // Control UI's HTTP reads. Mint the credential here instead: the device proof is
+  // verified by now, binding it to the shared-auth generation the HTTP side
+  // recomputes keeps a secret rotation from outliving it, and binding it to this
+  // connect's verified tailnet principal keeps a copy from being redeemable by
+  // another tailnet user on the same ingress. `verifyIdentity` is the same
+  // whois-checked resolution the connect authenticated with and is memoized per
+  // attribution, so this adds no lookup. No verified principal, no credential.
+  const controlUiCredentialIngress =
+    controlUiPairingKind === "tailscale-device" &&
+    device &&
+    !deviceToken &&
+    context.handler.ingressAttribution.kind === "tailscale-serve"
+      ? context.handler.ingressAttribution
+      : null;
+  const controlUiCredentialPrincipal = controlUiCredentialIngress
+    ? (await controlUiCredentialIngress.verifyIdentity())?.login
+    : undefined;
   const controlUiDeviceCredential =
-    controlUiPairingKind === "tailscale-device" && device && !deviceToken
+    device && controlUiCredentialPrincipal
       ? issueControlUiDeviceCredential({
           deviceId: device.id,
+          principal: controlUiCredentialPrincipal,
           authGeneration: resolveSharedGatewaySessionGeneration(
             resolvedAuth,
             context.configSnapshot.gateway?.trustedProxies,
