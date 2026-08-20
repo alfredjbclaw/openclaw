@@ -9,6 +9,7 @@
 // schedules that reconnect *before* the deadline, while the credential still
 // works. Lanes that carry no `httpCredential` schedule nothing and keep the
 // connection lifecycle they already had.
+import { resolveSafeTimeoutDelayMs } from "@openclaw/gateway-client/browser";
 import { resolveControlUiCredentialExpiryMs, type ControlUiAuthSource } from "./control-ui-auth.ts";
 
 /** Renew once most of the lifetime is spent, leaving slack for the reconnect. */
@@ -57,7 +58,14 @@ export function createControlUiCredentialRenewal(deps: {
           // answers cannot be retried into a storm from here.
           deps.renew();
         },
-        Math.max(MIN_RENEWAL_DELAY_MS, Math.floor(remainingMs * RENEWAL_LIFETIME_FRACTION)),
+        // Ceiling as well as floor. `httpCredentialExpiresAtMs` is an unbounded
+        // protocol integer, and a delay past the 32-bit timer range coerces to an
+        // immediate fire — which from here is renew, reconnect, fresh hello,
+        // immediate fire again. The floor keeps a stale deadline from looping;
+        // this keeps an oversized one from doing the same.
+        resolveSafeTimeoutDelayMs(Math.floor(remainingMs * RENEWAL_LIFETIME_FRACTION), {
+          minMs: MIN_RENEWAL_DELAY_MS,
+        }),
       );
     },
     stop,

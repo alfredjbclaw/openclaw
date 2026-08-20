@@ -4,6 +4,7 @@
 // check either side of that deadline: the point is that the browser reconnects
 // early enough for the replacement to exist before the old one dies.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_SAFE_TIMEOUT_DELAY_MS } from "../../../packages/gateway-client/src/timeouts.js";
 import {
   issueControlUiDeviceCredential,
   verifyControlUiDeviceCredential,
@@ -108,6 +109,54 @@ describe("control ui credential renewal", () => {
     expect(Date.now()).toBeLessThan(issued.expiresAtMs);
 
     renewal.stop();
+  });
+
+  it("clamps an oversized hello deadline instead of firing the renewal immediately", () => {
+    // Read the delay off `setTimeout` itself: `deps.renew` staying uncalled is a
+    // proxy that a leaked or coerced timer can keep green, and the defect here is
+    // precisely a delay the timer layer cannot represent.
+    const scheduleSpy = vi.spyOn(globalThis, "setTimeout");
+    const renew = vi.fn();
+    const renewal = createControlUiCredentialRenewal({ renew });
+
+    // An honest Gateway sends `now + 12h`; a hostile or buggy one can send any
+    // positive protocol integer, and 0.85 of that still overflows a 32-bit timer.
+    renewal.arm({
+      hello: {
+        auth: {
+          httpCredential: mintCredential(CONNECT_AT_MS).credential,
+          httpCredentialExpiresAtMs: Number.MAX_SAFE_INTEGER,
+        },
+      },
+    });
+
+    const scheduledDelayMs = Number(scheduleSpy.mock.calls.at(-1)?.[1]);
+    expect(scheduledDelayMs).toBe(MAX_SAFE_TIMEOUT_DELAY_MS);
+    // Unclamped, the overflowed delay fires on the next tick, and each renewal
+    // reconnects into a fresh hello that arms the same immediate fire again.
+    vi.advanceTimersByTime(0);
+    expect(renew).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(1);
+
+    renewal.stop();
+    scheduleSpy.mockRestore();
+  });
+
+  it("leaves an ordinary deadline scheduled on its own lifetime fraction", () => {
+    const scheduleSpy = vi.spyOn(globalThis, "setTimeout");
+    const renewal = createControlUiCredentialRenewal({ renew: vi.fn() });
+    const issued = mintCredential(CONNECT_AT_MS);
+
+    renewal.arm(serveHello(issued));
+
+    // The ceiling is a guard, not a new schedule: a real 12h credential still
+    // renews at its own fraction, well under the clamp.
+    expect(Number(scheduleSpy.mock.calls.at(-1)?.[1])).toBe(
+      Math.floor((issued.expiresAtMs - CONNECT_AT_MS) * 0.85),
+    );
+
+    renewal.stop();
+    scheduleSpy.mockRestore();
   });
 
   it("re-arms from each new hello without stacking timers", () => {
