@@ -1,16 +1,17 @@
 // Regression cover for the Control UI HTTP read surfaces over Tailscale Serve.
 //
-// Verified tailnet identity is ambient: every request from this host carries it,
-// so it buys exactly one thing — the metadata-only bootstrap config read that
-// lets a tokenless dashboard boot far enough to open its websocket (#67915). It
-// confers no operator authority and mints no capability.
+// Verified tailnet identity buys nothing here. It is ambient — every request
+// from this host carries it — so no Control UI read accepts it on its own, the
+// bootstrap config read included: a browser presenting nothing else gets a 401
+// off every one of them.
 //
-// Everything on the media route is device-bound instead. Once that websocket
-// connect authenticates, the Gateway hands the browser a credential bound to the
-// device that proved its keypair *and* to the verified tailnet principal that
-// connect ran as, and metadata, ticket minting, and bytes all run off that
-// credential or a real one. Redemption re-resolves the presenting request's own
-// verified principal, so the credential does not travel between tailnet users.
+// Every read is device-bound instead. Once the Control UI websocket connect
+// authenticates, the Gateway hands the browser a credential bound to the device
+// that proved its keypair *and* to the verified tailnet principal that connect
+// ran as, and the bootstrap config, media metadata, ticket minting, and bytes
+// all run off that credential or a real one. Redemption re-resolves the
+// presenting request's own verified principal, so the credential does not
+// travel between tailnet users.
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
@@ -28,10 +29,7 @@ import {
   CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
   type ControlUiPluginFrameGrantAck,
 } from "./control-ui-contract.js";
-import {
-  issueControlUiDeviceCredential,
-  issueUnboundControlUiDeviceCredentialForTest,
-} from "./control-ui-device-credential.js";
+import { issueControlUiDeviceCredential } from "./control-ui-device-credential.js";
 import {
   handleControlUiAssistantMediaRequest,
   handleControlUiAvatarRequest,
@@ -175,18 +173,6 @@ function deviceCredentialIssuedAt(nowMs: number): string {
   return issued.credential;
 }
 
-/** The shape this credential carried before it was bound to a principal. */
-function unboundDeviceCredential(): string {
-  const token = issueUnboundControlUiDeviceCredentialForTest({
-    deviceId: "device-tailscale-serve-dashboard",
-    authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
-  });
-  if (!token) {
-    throw new Error("expected an unbound Control UI credential");
-  }
-  return token;
-}
-
 async function withAssistantMediaFile<T>(
   name: string,
   fn: (filePath: string) => Promise<T>,
@@ -311,44 +297,53 @@ describe("control ui HTTP reads over Tailscale", () => {
     vi.restoreAllMocks();
   });
 
-  it("serves the bootstrap config for a device-less Tailscale browser (#67915)", async () => {
-    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
+  it("refuses the bootstrap config read for an ambient Tailscale browser", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
     await withControlUiRoot(async (tmp) => {
       const { res, handled } = await runBootstrapConfigRequest({
         rootPath: tmp,
         req: tailscaleServeRequest({ url: CONTROL_UI_BOOTSTRAP_CONFIG_PATH }),
       });
       expect(handled).toBe(true);
-      expect(res.statusCode).toBe(200);
+      // Verified tailnet identity and a same-origin fetch, and still nothing: the
+      // dashboard boots by skipping this read until its websocket connect has
+      // handed it a credential, so no Control UI read has an ambient lane left.
+      expect(res.statusCode).toBe(401);
     });
   });
 
-  it("grants no plugin frames and mints no plugin cookie for a device-less Tailscale browser", async () => {
-    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
-    registerAdminOnlyPluginTab();
-    await withControlUiRoot(async (tmp) => {
-      const { res, end, setHeader } = await runBootstrapConfigRequest({
-        rootPath: tmp,
-        req: tailscaleServeRequest({ url: CONTROL_UI_BOOTSTRAP_CONFIG_PATH }),
-      });
-      expect(res.statusCode).toBe(200);
-      // An admin-gated tab would only project if the request had been resolved
-      // with CLI_DEFAULT_OPERATOR_SCOPES, which is exactly the amplification
-      // this surface must not perform.
-      expect(readPluginFrameGrants(end)).toEqual([]);
-      expect(pluginAuthCookieCalls(setHeader)).toEqual([]);
-    });
-  });
-
-  it("ignores a self-asserted x-openclaw-scopes header on the Tailscale read path", async () => {
-    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
+  it("grants no plugin frames and mints no plugin cookie for a credentialed Tailscale browser", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
     registerAdminOnlyPluginTab();
     await withControlUiRoot(async (tmp) => {
       const { res, end, setHeader } = await runBootstrapConfigRequest({
         rootPath: tmp,
         req: tailscaleServeRequest({
           url: CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
-          headers: { "x-openclaw-scopes": "operator.admin,operator.write,operator.pairing" },
+          headers: { authorization: `Bearer ${postConnectDeviceCredential()}` },
+        }),
+      });
+      expect(res.statusCode).toBe(200);
+      // An admin-gated tab would only project if the request had been resolved
+      // with CLI_DEFAULT_OPERATOR_SCOPES, which is exactly the amplification the
+      // credential must not perform: it carries operator.read and nothing else.
+      expect(readPluginFrameGrants(end)).toEqual([]);
+      expect(pluginAuthCookieCalls(setHeader)).toEqual([]);
+    });
+  });
+
+  it("ignores a self-asserted x-openclaw-scopes header on the credentialed read path", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    registerAdminOnlyPluginTab();
+    await withControlUiRoot(async (tmp) => {
+      const { res, end, setHeader } = await runBootstrapConfigRequest({
+        rootPath: tmp,
+        req: tailscaleServeRequest({
+          url: CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
+          headers: {
+            authorization: `Bearer ${postConnectDeviceCredential()}`,
+            "x-openclaw-scopes": "operator.admin,operator.write,operator.pairing",
+          },
         }),
       });
       expect(res.statusCode).toBe(200);
@@ -398,8 +393,21 @@ describe("control ui HTTP reads over Tailscale", () => {
     });
   });
 
-  it("completes metadata to ticket to bytes for a post-connect device credential", async () => {
-    testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
+  it("completes bootstrap to metadata to ticket to bytes for a post-connect device credential", async () => {
+    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
+    await withControlUiRoot(async (tmp) => {
+      // The dashboard's real boot order on this lane: the config read it deferred
+      // until hello supplied a credential is the credential's first customer.
+      const bootstrap = await runBootstrapConfigRequest({
+        rootPath: tmp,
+        req: tailscaleServeRequest({
+          url: CONTROL_UI_BOOTSTRAP_CONFIG_PATH,
+          headers: { authorization: `Bearer ${postConnectDeviceCredential()}` },
+        }),
+      });
+      expect(bootstrap.handled).toBe(true);
+      expect(bootstrap.res.statusCode).toBe(200);
+    });
     await withAssistantMediaFile("tailscale-scopes-device-bound", async (filePath) => {
       const source = encodeURIComponent(filePath);
       const meta = await runAssistantMediaRequest(
@@ -500,9 +508,9 @@ describe("control ui HTTP reads over Tailscale", () => {
         tailscaleServeRequest({ url, headers }),
         TAILSCALE_DISABLED_AUTH,
       );
-      // Ambient bootstrap reads stop the moment the flag goes off. A credential
-      // minted out of that same lane has to stop with them, not run out its 12h
-      // TTL against an operator who has already turned the lane off.
+      // A credential minted out of the Tailscale lane has to stop when the
+      // operator turns that lane off, not run out its remaining 12h TTL against
+      // a decision that has already been made.
       expect(refused.handled).toBe(true);
       expect(refused.res.statusCode).toBe(401);
       expect(readResponseBody(refused.end)).not.toContain("mediaTicket");
@@ -593,23 +601,22 @@ describe("control ui HTTP reads over Tailscale", () => {
     });
   });
 
-  it("refuses a device credential that carries no principal claim", async () => {
-    testTailscaleWhois.value = { login: DASHBOARD_PRINCIPAL, name: "Peter" };
-    await withAssistantMediaFile("tailscale-scopes-unbound-credential", async (filePath) => {
-      const { res, end, handled } = await runAssistantMediaRequest(
-        tailscaleServeRequest({
-          url: `/__openclaw__/assistant-media?meta=1&source=${encodeURIComponent(filePath)}`,
-          headers: { authorization: `Bearer ${unboundDeviceCredential()}` },
+  it.each([null, undefined, "", "   "])(
+    "mints no credential for a connect whose principal is %j",
+    (principal) => {
+      // Redemption refuses an unbound claim set, but the load-bearing half of that
+      // guarantee is here: an unbound credential is not a shape production can
+      // produce. A connect with no whois-verified login to bind gets nothing, so
+      // the browser is left presenting no bearer rather than an unbindable one.
+      expect(
+        issueControlUiDeviceCredential({
+          deviceId: "device-tailscale-serve-dashboard",
+          principal,
+          authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
         }),
-      );
-
-      expect(handled).toBe(true);
-      // Same ingress, same verified principal the credential was minted under —
-      // it still fails, because an absent claim is a rejection and not a default.
-      expect(res.statusCode).toBe(401);
-      expect(readResponseBody(end)).not.toContain("mediaTicket");
-    });
-  });
+      ).toBeNull();
+    },
+  );
 
   it("still refuses a cross-site assistant-media ticket mint over Tailscale Serve", async () => {
     testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
@@ -635,7 +642,7 @@ describe("control ui HTTP reads over Tailscale", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("keeps the ambient bootstrap read scoped to managed Tailscale Serve ingress", async () => {
+  it("fails the bootstrap read closed on unattributable tailnet-shaped headers", async () => {
     testTailscaleWhois.value = { login: "peter@github", name: "Peter" };
     await withControlUiRoot(async (tmp) => {
       const { res, end } = await runBootstrapConfigRequest({

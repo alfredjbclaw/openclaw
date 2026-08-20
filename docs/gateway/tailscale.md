@@ -102,10 +102,7 @@ This tokenless flow assumes the gateway host is trusted. If untrusted local code
 
 Scope of the bypass:
 
-- Applies to the Control UI WebSocket auth surface, read-only `GET`/`HEAD` requests for Control UI profile avatars, and the Control UI bootstrap config read (`/control-ui-config.json`). The bootstrap read is included because a device that connects over Serve skips pairing and therefore never receives a device token, leaving the browser with no HTTP credential to boot with; it returns dashboard metadata only.
-- On those HTTP read surfaces, ambient identity requires same-origin browser evidence: a request carrying a browser `Origin` must pass the Control UI browser-origin policy (same-origin with the request host, or an entry in `gateway.controlUi.allowedOrigins` — wildcard entries never grant ambient identity), and a request without `Origin` is accepted only when Fetch Metadata reports `Sec-Fetch-Site: same-origin`. Cross-site pages and non-browser clients cannot ride the ambient Tailscale identity; explicit token auth still works for them.
-- Ambient Tailscale identity is not paired-device authentication and confers no operator authority beyond read access: the bootstrap read grants no operator scopes beyond `operator.read`, projects no plugin frames, sets no plugin auth cookie, and a self-asserted `x-openclaw-scopes` header is ignored.
-- Ambient identity mints no capability. Assistant-media metadata, media-ticket minting, and media byte reads are device-bound instead: they require a gateway token, trusted-proxy identity, a paired device token, or the device-bound HTTP credential described below. Control UI avatar reads accept only those real credentials.
+- Applies to the Control UI WebSocket auth surface and read-only `GET`/`HEAD` requests for Control UI profile avatars. No other HTTP read accepts Tailscale identity on its own: the Control UI's bootstrap config read (`/control-ui-config.json`), assistant-media metadata, media-ticket minting, and media bytes all require a real credential — a gateway token, trusted-proxy identity, a paired device token, or the device-bound HTTP credential described below.
 - Other HTTP API endpoints (`/v1/*`, `/tools/invoke`, `/api/channels/*`, etc.) never use Tailscale identity-header auth; they always follow the gateway's normal HTTP auth mode.
 - For Control UI operator sessions that already carry browser device identity, a verified Tailscale identity skips the bootstrap-token/QR pairing round trip.
 - It does not bypass device identity itself: device-less clients are still rejected, and node-role connections still go through normal pairing and auth checks.
@@ -113,23 +110,27 @@ Scope of the bypass:
 ### Device-bound HTTP credential
 
 Because the Serve lane skips pairing, the browser holds no paired-device token for
-its later HTTP reads. The gateway closes that gap on the WebSocket handshake
-instead of widening ambient identity: once the connect authenticates and the
+its HTTP reads. The gateway closes that gap on the WebSocket handshake rather than
+by accepting ambient identity on HTTP: once the connect authenticates and the
 device proves its keypair, `hello-ok` carries a short-lived credential bound to
 that device, and the Control UI presents it as a bearer token on Control UI read
 routes. The credential:
 
 - is issued only after an authenticated Control UI connect on this lane — a
   request that never completed that handshake cannot obtain one;
+- is bound to the whois-verified tailnet principal that connect ran as, and is
+  refused when a different verified principal presents it;
 - carries `operator.read` and nothing else, and never trusts `x-openclaw-scopes`;
 - is accepted only on requests arriving through the managed Tailscale Serve
-  listener, so a copy lifted off the browser is useless elsewhere;
+  listener while `gateway.auth.allowTailscale` is still on, so a copy lifted off
+  the browser is useless elsewhere;
 - expires on its own, is invalidated by a gateway restart, and stops verifying
   when `gateway.auth.token`/`password` rotates.
 
-The dashboard's flow is therefore: bootstrap config (ambient) → WebSocket connect
-(authenticated) → device-bound credential → assistant-media metadata → media
-ticket → bytes.
+The dashboard's flow is therefore: WebSocket connect (authenticated) →
+device-bound credential → bootstrap config → assistant-media metadata → media
+ticket → bytes. Nothing before the connect reads the Gateway over HTTP: the
+Control UI defers its config fetch until it holds a credential to send.
 
 ### Externally managed Serve and Funnel
 

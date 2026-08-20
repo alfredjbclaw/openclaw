@@ -62,11 +62,7 @@ type ConnectAuth = {
   password?: string;
 };
 
-type GatewayAuthSurface =
-  | "http"
-  | "http-user-profile-avatar"
-  | "http-control-ui-bootstrap"
-  | "ws-control-ui";
+type GatewayAuthSurface = "http" | "http-user-profile-avatar" | "ws-control-ui";
 
 /** Inputs needed to authorize one HTTP or websocket gateway connection. */
 type AuthorizeGatewayConnectParams = {
@@ -258,20 +254,7 @@ function authorizeTrustedProxy(params: {
 }
 
 function shouldAllowTailscaleHeaderAuth(authSurface: GatewayAuthSurface): boolean {
-  return (
-    authSurface === "ws-control-ui" ||
-    authSurface === "http-user-profile-avatar" ||
-    authSurface === "http-control-ui-bootstrap"
-  );
-}
-
-/**
- * Ambient (credential-less) identity is only ever accepted from a same-origin
- * browser fetch, so a cross-site page cannot ride the tailnet identity the
- * gateway sees on every request from this host.
- */
-function requiresSameOriginBrowserEvidence(authSurface: GatewayAuthSurface): boolean {
-  return authSurface === "http-user-profile-avatar" || authSurface === "http-control-ui-bootstrap";
+  return authSurface === "ws-control-ui" || authSurface === "http-user-profile-avatar";
 }
 
 function authorizeHttpBrowserOrigin(params: {
@@ -466,19 +449,13 @@ async function authorizeGatewayConnectCore(
   const explicitSharedSecretAuth = hasExplicitSharedSecretAuth(connectAuth);
 
   if (
-    requiresSameOriginBrowserEvidence(authSurface) &&
+    authSurface === "http-user-profile-avatar" &&
     auth.allowTailscale &&
-    ingressAttribution?.kind === "tailscale-serve" &&
     !localDirect &&
     !explicitSharedSecretAuth
   ) {
-    // Reject cross-origin ambient requests before the Tailscale WhoIs lookup.
-    // Same-origin <img> loads and the dashboard's own bootstrap fetch may omit
-    // Origin, but Fetch Metadata still identifies their source. Explicit
-    // shared-secret auth is not subject to this browser gate, and neither is
-    // any other ingress: only managed Tailscale Serve carries the ambient
-    // identity this gate guards, so a trusted-proxy deployment authenticates
-    // through its own branch below.
+    // Reject cross-origin ambient avatar requests before the Tailscale WhoIs
+    // lookup. Explicit shared-secret auth is not subject to this browser gate.
     const originResult = authorizeHttpBrowserOrigin({
       authSurface,
       browserOriginPolicy: params.browserOriginPolicy,
@@ -622,25 +599,6 @@ export async function authorizeUserProfileAvatarHttpGatewayConnect(
   return authorizeGatewayConnect({
     ...params,
     authSurface: "http-user-profile-avatar",
-  });
-}
-
-/**
- * Authorize the Control UI bootstrap config read (`/control-ui-config.json`)
- * and the assistant-media metadata/ticket-mint read, including verified
- * Tailscale identity: Serve skips pairing for a device that never becomes
- * paired, so the browser holds no device token and these metadata reads are
- * the dashboard's only way in. Deliberately narrow — no local file bytes are
- * ever served under this surface (byte reads require the minted source-scoped
- * ticket or a real credential), and (see `authorizeControlUiReadRequestOrReply`)
- * it confers no operator scopes.
- */
-export async function authorizeControlUiBootstrapHttpGatewayConnect(
-  params: Omit<AuthorizeGatewayConnectParams, "authSurface">,
-): Promise<GatewayAuthResult> {
-  return authorizeGatewayConnect({
-    ...params,
-    authSurface: "http-control-ui-bootstrap",
   });
 }
 

@@ -346,8 +346,8 @@ export function registerAuthModesSuite(): void {
       expect(res.ok, JSON.stringify(res)).toBe(true);
       // This lane skips pairing, so there is no paired row to bind a device token
       // to. Without the credential below the dashboard leaves the handshake unable
-      // to authenticate any Control UI HTTP read, which is what forced the
-      // ambient ticket-minting path this connect replaces.
+      // to authenticate any Control UI HTTP read at all — not its bootstrap config,
+      // not assistant media.
       expect(readHelloAuthField(res.payload, "deviceToken")).toBeUndefined();
       const credential = String(readHelloAuthField(res.payload, "httpCredential") ?? "");
       expect(credential).toMatch(/^v1\./);

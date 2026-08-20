@@ -418,11 +418,6 @@ export async function handleControlUiAssistantMediaRequest(
       allowRealIpFallback: opts?.allowRealIpFallback,
       rateLimiter: opts?.rateLimiter,
       allowQueryToken: true,
-      // Deliberately no ambient identity on either half of this route. The
-      // metadata read mints the source-scoped ticket that unlocks the byte read,
-      // so it is a capability mint and needs a real credential: a shared secret,
-      // a paired-device token, or the device-bound credential the Gateway hands
-      // a Tailscale Serve dashboard once its websocket connect is authenticated.
     }))
   ) {
     return true;
@@ -807,7 +802,6 @@ export async function handleControlUiHttpRequest(
         trustedProxies: opts?.trustedProxies,
         allowRealIpFallback: opts?.allowRealIpFallback,
         rateLimiter: opts?.rateLimiter,
-        allowAmbientTailscaleIdentity: true,
         onPluginFrameGrants: (grants) => {
           pluginFrameGrants = grants;
         },

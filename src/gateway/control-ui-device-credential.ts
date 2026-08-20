@@ -8,9 +8,9 @@
 // after the device proof is verified, and the consolidated Control UI read
 // authorizer accepts it where a paired-device token would otherwise be required.
 //
-// It is deliberately not an ambient-identity grant. A request that never
-// completed the authenticated websocket connect cannot produce one, and the
-// credential carries only the read scope the assistant-media surfaces need.
+// Nothing about it is ambient: a request that never completed the authenticated
+// websocket connect cannot produce one, and the credential carries only the read
+// scope the Control UI read surfaces need.
 // Its reach is the tailnet principal that minted it: issuance records the
 // whois-verified login of the connect, redemption re-resolves the presenting
 // request's own verified login and refuses anything else. So a copy lifted off
@@ -69,23 +69,6 @@ export function issueControlUiDeviceCredential(params: {
   return signed ? { credential: signed.token, expiresAtMs: signed.expiresAtMs } : null;
 }
 
-/**
- * Mint the pre-binding shape this credential used to have, so redemption tests
- * can prove an unbound claim set is refused rather than defaulted through.
- */
-export function issueUnboundControlUiDeviceCredentialForTest(params: {
-  deviceId: string;
-  authGeneration: string | undefined;
-}): string | null {
-  const signed = createControlUiSignedToken({
-    secret: controlUiDeviceCredentialSecret,
-    scope: CONTROL_UI_DEVICE_CREDENTIAL_SCOPE,
-    claims: { deviceId: params.deviceId, authGeneration: params.authGeneration ?? null },
-    ttlMs: CONTROL_UI_DEVICE_CREDENTIAL_TTL_MS,
-  });
-  return signed?.token ?? null;
-}
-
 /** Operator scopes a presented credential authorizes, or null when it is not one. */
 export async function verifyControlUiDeviceCredential(params: {
   credential: string | null | undefined;
@@ -104,8 +87,8 @@ export async function verifyControlUiDeviceCredential(params: {
     token: params.credential,
     ...(params.nowMs === undefined ? {} : { nowMs: params.nowMs }),
   });
-  // An intact device binding is what separates this from ambient identity, and
-  // rotating the shared gateway secret retires the credentials it was issued under.
+  // An intact device binding is what makes this a credential at all, and rotating
+  // the shared gateway secret retires the credentials it was issued under.
   if (!claims || typeof claims.deviceId !== "string" || !claims.deviceId) {
     return null;
   }

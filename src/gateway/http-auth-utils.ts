@@ -16,7 +16,6 @@ import {
   AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET,
 } from "./auth-rate-limit.js";
 import {
-  authorizeControlUiBootstrapHttpGatewayConnect,
   authorizeHttpGatewayConnect,
   authorizeUserProfileAvatarHttpGatewayConnect,
   type GatewayAuthResult,
@@ -40,7 +39,6 @@ import {
 import {
   ADMIN_SCOPE,
   CLI_DEFAULT_OPERATOR_SCOPES,
-  READ_SCOPE,
   authorizeOperatorScopesForMethod,
 } from "./method-scopes.js";
 import { resolveBrowserOriginPolicy } from "./origin-check.js";
@@ -117,13 +115,6 @@ type ControlUiReadAuthParams = Omit<GatewayHttpRequestAuthParams, "auth"> & {
   allowQueryToken?: boolean;
   requiredOperatorMethod?: string;
   onPluginFrameGrants?: (grants: readonly ControlUiPluginFrameGrantAck[]) => void;
-  /**
-   * Accept ambient Tailscale identity from a same-origin browser fetch. Only the
-   * metadata-only Control UI bootstrap read sets this. It is what lets a tokenless
-   * Serve dashboard boot far enough to open its authenticated websocket; it mints
-   * no capability, so no route that serves bytes or hands out a ticket may set it.
-   */
-  allowAmbientTailscaleIdentity?: boolean;
 };
 
 export function resolveHttpBrowserOriginPolicy(
@@ -203,14 +194,8 @@ function resolveControlUiReadOperatorScopes(
   if (authMethod === "device-token") {
     return deviceScopes ?? [];
   }
-  if (authMethod === "trusted-proxy") {
+  if (authMethod === "trusted-proxy" || authMethod === "tailscale") {
     return resolveTrustedHttpOperatorScopes(req, { trustDeclaredOperatorScopes: true });
-  }
-  if (authMethod === "tailscale") {
-    // Ambient tailnet identity is not paired-device authentication: it gets the
-    // read scope the one metadata-only surface that accepts it needs, and nothing
-    // else — no declared x-openclaw-scopes trust, no CLI default operator scopes.
-    return [READ_SCOPE];
   }
   return authMethod === "bootstrap-token" ? [] : [...CLI_DEFAULT_OPERATOR_SCOPES];
 }
@@ -239,10 +224,7 @@ export async function authorizeControlUiReadRequestOrReply(
   const canUseDeviceTokenFallback =
     Boolean(token) && auth.mode !== "trusted-proxy" && auth.mode !== "none";
   const run = async (): Promise<AuthorizedControlUiReadRequest | null> => {
-    const authorizeShared = params.allowAmbientTailscaleIdentity
-      ? authorizeControlUiBootstrapHttpGatewayConnect
-      : authorizeHttpGatewayConnect;
-    const authResult = await authorizeShared({
+    const authResult = await authorizeHttpGatewayConnect({
       auth,
       connectAuth: token ? { token, password: token } : null,
       req: params.req,
@@ -287,12 +269,12 @@ export async function authorizeControlUiReadRequestOrReply(
         // The post-connect credential is redeemable only on the managed-Serve
         // ingress and only by the tailnet principal it was minted for, which the
         // verifier re-resolves from this request's own whois-checked identity.
-        // Redemption re-reads `allowTailscale` for the same reason the bootstrap
-        // path does (`auth.ts`): nothing rotates an outstanding credential when
-        // that flag flips, so without this an operator who turns the Tailscale
-        // lane off would still be serving credential-bearing reads for the rest
-        // of the 12h TTL while ambient reads had already stopped. Falling through
-        // leaves paired-device tokens their existing ingress-agnostic reach.
+        // Redemption re-reads `allowTailscale` because nothing rotates an
+        // outstanding credential when that flag flips: without this an operator
+        // who turns the Tailscale lane off would keep serving credential-bearing
+        // reads for the rest of the 12h TTL, on the very lane they disabled.
+        // Falling through leaves paired-device tokens their existing
+        // ingress-agnostic reach.
         const serveIngress =
           auth.allowTailscale && ingressAttribution.kind === "tailscale-serve"
             ? ingressAttribution
@@ -324,11 +306,8 @@ export async function authorizeControlUiReadRequestOrReply(
     }
 
     const authMethod = resolvedAuthResult.method ?? "none";
-    // Tailscale header auth proves tailnet identity, not operator authority, and the
-    // only surfaces accepting it here have no paired device to bound it. Excluding it
-    // withholds x-openclaw-scopes trust, CLI default operator scopes, and plugin-frame
-    // grants.
-    const trustDeclaredOperatorScopes = authMethod === "trusted-proxy";
+    const trustDeclaredOperatorScopes =
+      authMethod === "trusted-proxy" || authMethod === "tailscale";
     params.onPluginFrameGrants?.(
       setControlUiPluginAuthCookieForRequest(
         params.req,

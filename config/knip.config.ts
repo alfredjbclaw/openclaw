@@ -397,10 +397,6 @@ const config = {
     "src/gateway/board-view-ticket.ts": ["exports"],
     // Focused startup tests consume this explicit seam; production imports only the bootstrap.
     "src/gateway/server-startup-bootstrap.ts": ["exports"],
-    // Redemption must refuse a credential carrying no principal claim. Nothing in
-    // production can mint that shape any more, so the regression test needs a seam
-    // that forges it; the full-tree scan still audits it against that consumer.
-    "src/gateway/control-ui-device-credential.ts": ["exports"],
     // Registry facades retain direct registration/reset compatibility seams used by focused
     // tests; the full-tree scan still audits every named export against those consumers.
     "src/agents/harness/registry.ts": ["exports"],
