@@ -5,13 +5,15 @@
 // bootstrap config read included: a browser presenting nothing else gets a 401
 // off every one of them.
 //
-// Every read is device-bound instead. Once the Control UI websocket connect
-// authenticates, the Gateway hands the browser a credential bound to the device
-// that proved its keypair *and* to the verified tailnet principal that connect
-// ran as, and the bootstrap config, media metadata, ticket minting, and bytes
-// all run off that credential or a real one. Redemption re-resolves the
-// presenting request's own verified principal, so the credential does not
-// travel between tailnet users.
+// Every read is principal-bound instead. Once the Control UI websocket connect
+// authenticates, the Gateway hands the browser a credential whose issuance is
+// device-gated — it is minted only after that connect's device proof verifies —
+// and the bootstrap config, media metadata, ticket minting, and bytes all run
+// off that credential or a real one. Redemption re-resolves the presenting
+// request's own verified principal and requires managed Serve ingress; it does
+// not re-check the device. So the credential does not travel between tailnet
+// users, but another client acting as the same verified principal can present
+// it until it expires.
 import fs from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import path from "node:path";
@@ -148,7 +150,7 @@ function postConnectDeviceCredential(principal = DASHBOARD_PRINCIPAL): string {
     authGeneration: resolveSharedGatewaySessionGeneration(TAILSCALE_AUTH),
   });
   if (!issued) {
-    throw new Error("expected a device-bound Control UI credential");
+    throw new Error("expected a principal-bound Control UI credential");
   }
   return issued.credential;
 }
@@ -168,7 +170,7 @@ function deviceCredentialIssuedAt(nowMs: number): string {
     nowMs,
   });
   if (!issued) {
-    throw new Error("expected a device-bound Control UI credential");
+    throw new Error("expected a principal-bound Control UI credential");
   }
   return issued.credential;
 }
@@ -408,7 +410,7 @@ describe("control ui HTTP reads over Tailscale", () => {
       expect(bootstrap.handled).toBe(true);
       expect(bootstrap.res.statusCode).toBe(200);
     });
-    await withAssistantMediaFile("tailscale-scopes-device-bound", async (filePath) => {
+    await withAssistantMediaFile("tailscale-scopes-principal-bound", async (filePath) => {
       const source = encodeURIComponent(filePath);
       const meta = await runAssistantMediaRequest(
         tailscaleServeRequest({

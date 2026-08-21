@@ -337,7 +337,7 @@ export function registerAuthModesSuite(): void {
       return claims[claim];
     };
 
-    test("hands the tailscale control ui a device-bound credential for its HTTP reads", async () => {
+    test("hands the tailscale control ui a principal-bound credential for its HTTP reads", async () => {
       const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
       const res = await connectReq(ws, {
         skipDefaultAuth: true,
@@ -361,7 +361,7 @@ export function registerAuthModesSuite(): void {
       ws.close();
     });
 
-    test("issues no device-bound credential when shared-secret auth carries the connect", async () => {
+    test("issues no principal-bound credential when shared-secret auth carries the connect", async () => {
       const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
       const res = await connectReq(ws, {
         token: "secret",

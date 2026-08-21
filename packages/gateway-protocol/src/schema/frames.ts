@@ -131,8 +131,12 @@ export const HelloOkSchema = closedObject({
   pluginSurfaceUrls: Type.Optional(Type.Record(NonEmptyString, NonEmptyString)),
   auth: closedObject({
     deviceToken: Type.Optional(NonEmptyString),
-    // Additive: device-bound HTTP credential for Control UI read routes, issued
+    // Additive: principal-bound HTTP credential for Control UI read routes, issued
     // when this connect authenticated on a lane that mints no paired-device token.
+    // Issuance is device-gated (minted only after this connect's device proof
+    // verifies) but redemption re-verifies the tailnet principal and managed Serve
+    // ingress, not the device — another client acting as the same verified
+    // principal can present it until it expires.
     // Not a device token — it never authenticates a websocket connect.
     httpCredential: Type.Optional(NonEmptyString),
     httpCredentialExpiresAtMs: Type.Optional(Type.Integer({ minimum: 0 })),
