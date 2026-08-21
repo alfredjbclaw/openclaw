@@ -12,6 +12,7 @@ import {
   finalizeNodePairingCleanupClaim,
   recordPairedNodeConnection,
 } from "../../../infra/device-pairing-node.js";
+import { roleScopesAllow } from "../../../shared/operator-scope-compat.js";
 import { hasMultipleSessionSharingIdentities } from "../../../state/user-profiles.js";
 import { resolveRuntimeServiceBuildId, resolveRuntimeServiceVersion } from "../../../version.js";
 import { resolveChatAttachmentPolicy } from "../../chat-attachment-policy.js";
@@ -30,6 +31,7 @@ import {
 import { canReadDetailedUpdateMetadata } from "../../events.js";
 import { ADMIN_SCOPE } from "../../method-scopes.js";
 import { scheduleNodeConnectionNotification } from "../../node-connection-notifications.js";
+import { READ_SCOPE } from "../../operator-scopes.js";
 import { MAX_BUFFERED_BYTES, MAX_PAYLOAD_BYTES, TICK_INTERVAL_MS } from "../../server-constants.js";
 import { formatError } from "../../server-utils.js";
 import { allowedSessionVisibilities } from "../../session-sharing.js";
@@ -95,10 +97,20 @@ export async function sendGatewayHello(
   // another tailnet user on the same ingress. `verifyIdentity` is the same
   // whois-checked resolution the connect authenticated with and is memoized per
   // attribution, so this adds no lookup. No verified principal, no credential.
+  // The credential redeems as `operator.read` over HTTP, so it is never minted
+  // beyond this session's own read authority: `scopes` here is the final
+  // post-cap set, and a session that cannot read over the socket cannot hand
+  // itself a credential that can.
+  const controlUiCredentialHasReadAuthority = roleScopesAllow({
+    role,
+    requestedScopes: [READ_SCOPE],
+    allowedScopes: scopes,
+  });
   const controlUiCredentialIngress =
     controlUiPairingKind === "tailscale-device" &&
     device &&
     !deviceToken &&
+    controlUiCredentialHasReadAuthority &&
     context.handler.ingressAttribution.kind === "tailscale-serve"
       ? context.handler.ingressAttribution
       : null;

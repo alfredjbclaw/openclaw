@@ -361,6 +361,52 @@ export function registerAuthModesSuite(): void {
       ws.close();
     });
 
+    test("mints no credential when the session's effective scopes exclude read", async () => {
+      const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
+      const res = await connectReq(ws, {
+        skipDefaultAuth: true,
+        client: { ...CONTROL_UI_CLIENT },
+        scopes: ["operator.approvals"],
+      });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      // The credential redeems as operator.read on the HTTP side, so a session
+      // that holds no read authority over the socket must not be handed one —
+      // otherwise the credential outscopes the connect that produced it.
+      expect(readHelloAuthField(res.payload, "httpCredential")).toBeUndefined();
+      expect(readHelloAuthField(res.payload, "httpCredentialExpiresAtMs")).toBeUndefined();
+      ws.close();
+    });
+
+    test("mints the credential for a read-scoped session", async () => {
+      const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
+      const res = await connectReq(ws, {
+        skipDefaultAuth: true,
+        client: { ...CONTROL_UI_CLIENT },
+        scopes: ["operator.read"],
+      });
+      expect(res.ok, JSON.stringify(res)).toBe(true);
+      expect(String(readHelloAuthField(res.payload, "httpCredential") ?? "")).toMatch(/^v1\./);
+      ws.close();
+    });
+
+    test("mints the credential when write or admin implies read", async () => {
+      for (const scope of ["operator.write", "operator.admin"]) {
+        const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
+        const res = await connectReq(ws, {
+          skipDefaultAuth: true,
+          client: { ...CONTROL_UI_CLIENT },
+          scopes: [scope],
+        });
+        expect(res.ok, JSON.stringify(res)).toBe(true);
+        // operator.write and operator.admin both satisfy operator.read, so the
+        // gate reuses roleScopesAllow rather than testing for the literal scope.
+        expect(String(readHelloAuthField(res.payload, "httpCredential") ?? ""), scope).toMatch(
+          /^v1\./,
+        );
+        ws.close();
+      }
+    });
+
     test("issues no principal-bound credential when shared-secret auth carries the connect", async () => {
       const ws = await openTailscaleWs(tailscaleEndpoint, { origin: tailscaleOrigin });
       const res = await connectReq(ws, {
