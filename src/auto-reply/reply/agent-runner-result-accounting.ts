@@ -222,6 +222,12 @@ export async function accountAgentTurn(context: AgentTurnAccountingContext) {
   const cliSessionBinding = usedCliProvider
     ? runResult.meta?.agentMeta?.cliSessionBinding
     : undefined;
+  // Auth identity this run resolved: `clearCliSession` records it when the
+  // outgoing binding recorded none, and the bare-id fallback stores it so no
+  // future clear faces that gap again.
+  const cliSessionAuthIdentity = usedCliProvider
+    ? runResult.meta?.agentMeta?.cliSessionAuthIdentity
+    : undefined;
   const clearCliSessionBinding =
     usedCliProvider && runResult.meta?.agentMeta?.clearCliSessionBinding === true;
   const runtimeContextTokens =
@@ -272,6 +278,7 @@ export async function accountAgentTurn(context: AgentTurnAccountingContext) {
     systemPromptReport: runResult.meta?.systemPromptReport,
     cliSessionId,
     cliSessionBinding,
+    cliSessionAuthIdentity,
     clearCliSessionBinding,
     preserveFreshTotalTokensOnStaleUsage: preflightCompactionApplied,
     agentHarnessId: runResult.meta?.agentMeta?.agentHarnessId,

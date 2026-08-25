@@ -26,7 +26,7 @@ import {
   persistSessionTranscriptTurn,
   type SessionTranscriptRuntimeTarget,
 } from "../../config/sessions/session-accessor.js";
-import type { SessionEntry } from "../../config/sessions/types.js";
+import type { CliSessionAuthIdentitySnapshot, SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   injectTimestamp,
@@ -71,6 +71,7 @@ import { runCliAgent } from "../cli-runner.js";
 import { hasCliLiveSession } from "../cli-runner/cli-live-session-registry.js";
 import { resolveCliRuntimeToolsAllow } from "../cli-runner/tool-policy.js";
 import {
+  cliSessionClearAuthFromRun,
   getCliSessionBinding,
   resolveCliSessionClearReason,
   shouldClearFailedCliSessionBinding,
@@ -843,6 +844,11 @@ export function runAgentAttempt(params: {
             storePath: params.storePath,
           }
         : undefined;
+    // The clear paths below run outside a result: the pre-run transcript repair,
+    // the mid-run fresh-session retry, and the post-failure clear. The run
+    // reports the identity it resolved so those clears can record it on a
+    // binding that carried none of its own.
+    let runCliSessionAuthIdentity: CliSessionAuthIdentitySnapshot | undefined;
     const resolveReusableCliSessionBinding = async () => {
       const hasManagedClaudeLiveSession = Boolean(
         isClaudeCliProvider(cliExecutionProvider) &&
@@ -877,6 +883,11 @@ export function runAgentAttempt(params: {
           (await clearCliSessionInStore({
             provider: cliExecutionProvider,
             ...mutableCliSessionStore,
+            // Runs before this turn resolves its auth, so there is no current
+            // identity to record yet. The turn re-binds immediately below
+            // (settlement writes an auth-bearing binding) or fails into the
+            // post-failure clear, which does have one.
+            clearAuthProvenance: cliSessionClearAuthFromRun(runCliSessionAuthIdentity),
           })) ?? params.sessionEntry;
       }
 
@@ -917,6 +928,9 @@ export function runAgentAttempt(params: {
         },
         async () => {
           return await runCliAgent({
+            onCliSessionAuthIdentity: (identity) => {
+              runCliSessionAuthIdentity = identity;
+            },
             preparedRunAdmission: params.preparedRunAdmission,
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
@@ -1087,6 +1101,7 @@ export function runAgentAttempt(params: {
                       provider: cliExecutionProvider,
                       expectedCliSessionId: retry.sessionId,
                       ...mutableCliSessionStore,
+                      clearAuthProvenance: cliSessionClearAuthFromRun(runCliSessionAuthIdentity),
                     });
                     if (!cleared) {
                       return false;
@@ -1131,6 +1146,7 @@ export function runAgentAttempt(params: {
               provider: cliExecutionProvider,
               expectedCliSessionId: failedCliSessionId,
               ...mutableCliSessionStore,
+              clearAuthProvenance: cliSessionClearAuthFromRun(runCliSessionAuthIdentity),
             })) ?? params.sessionEntry;
         }
         throw err;

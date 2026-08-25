@@ -3,6 +3,7 @@ import { asNonNegativeFiniteNumber } from "@openclaw/normalization-core/number-c
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   clearCliSession,
+  cliSessionClearAuthFromRun,
   setCliSessionBinding,
   setCliSessionId,
 } from "../../agents/cli-session.js";
@@ -28,6 +29,7 @@ function applyCliSessionIdToSessionPatch(
     providerUsed?: string;
     cliSessionId?: string;
     cliSessionBinding?: import("../../config/sessions.js").CliSessionBinding;
+    cliSessionAuthIdentity?: import("../../config/sessions.js").CliSessionAuthIdentitySnapshot;
     clearCliSessionBinding?: boolean;
   },
   entry: SessionEntry,
@@ -39,7 +41,11 @@ function applyCliSessionIdToSessionPatch(
   }
   if (params.clearCliSessionBinding === true) {
     const nextEntry = { ...entry, ...patch };
-    clearCliSession(nextEntry, cliProvider);
+    clearCliSession(
+      nextEntry,
+      cliProvider,
+      cliSessionClearAuthFromRun(params.cliSessionAuthIdentity),
+    );
     return {
       ...patch,
       cliSessionIds: nextEntry.cliSessionIds,
@@ -59,7 +65,7 @@ function applyCliSessionIdToSessionPatch(
   }
   if (params.cliSessionId) {
     const nextEntry = { ...entry, ...patch };
-    setCliSessionId(nextEntry, cliProvider, params.cliSessionId);
+    setCliSessionId(nextEntry, cliProvider, params.cliSessionId, params.cliSessionAuthIdentity);
     return {
       ...patch,
       cliSessionIds: nextEntry.cliSessionIds,
@@ -118,6 +124,7 @@ export async function persistSessionUsageUpdate(params: {
   systemPromptReport?: SessionSystemPromptReport;
   cliSessionId?: string;
   cliSessionBinding?: import("../../config/sessions.js").CliSessionBinding;
+  cliSessionAuthIdentity?: import("../../config/sessions.js").CliSessionAuthIdentitySnapshot;
   clearCliSessionBinding?: boolean;
   compactionTokensAfter?: number;
   preserveFreshTotalTokensOnStaleUsage?: boolean;

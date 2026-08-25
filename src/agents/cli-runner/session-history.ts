@@ -20,6 +20,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { readFileWindowFully } from "../../infra/file-read.js";
 import { isPathInside } from "../../infra/path-guards.js";
+import { MAX_CLI_SESSION_HISTORY_BYTES } from "../../shared/session-transcript-limits.js";
 import { resolveSessionAgentIds } from "../agent-scope.js";
 import {
   limitAgentHookHistoryMessages,
@@ -28,11 +29,12 @@ import {
 import type { AgentMessage } from "../runtime/index.js";
 import { migrateSessionEntries, parseSessionEntries } from "../sessions/session-manager.js";
 import { cliBackendLog } from "./log.js";
+import { loadCliSessionEntriesFromStore } from "./session-history.store-read.js";
 
-/** Maximum transcript size read for CLI session history. */
-const MAX_CLI_SESSION_HISTORY_FILE_BYTES = 5 * 1024 * 1024;
 /** Maximum transcript messages exposed to CLI hook history. */
 const MAX_CLI_SESSION_HISTORY_MESSAGES = MAX_AGENT_HOOK_HISTORY_MESSAGES;
+/** Maximum transcript rows read back from the session store, newest first. */
+const MAX_CLI_SESSION_HISTORY_ENTRIES = MAX_CLI_SESSION_HISTORY_MESSAGES;
 /** Minimum reseed-history prompt budget for fresh CLI sessions. */
 const MAX_CLI_SESSION_RESEED_HISTORY_CHARS = 12 * 1024;
 /** Maximum automatic reseed-history prompt budget derived from context size. */
@@ -83,6 +85,22 @@ const RAW_TRANSCRIPT_RESEED_ALLOWED_REASONS = new Set<RawTranscriptReseedReason>
   "cwd",
   "mcp",
   "session-expired",
+]);
+
+/**
+ * Reseed reasons that say this turn resolved a different auth identity than the
+ * one the stored transcript was written under.
+ *
+ * Both are already absent from `RAW_TRANSCRIPT_RESEED_ALLOWED_REASONS`, which is
+ * what refuses a raw tail across the boundary. They are named again here because
+ * the compacted branch needs the same answer for its own reason, and "absent
+ * from the raw allowlist" is the wrong test to reuse: a reason may be kept off
+ * that allowlist for reasons that have nothing to do with auth, and the
+ * compacted branch would then refuse content it has no cause to refuse.
+ */
+const AUTH_CROSSING_RESEED_REASONS = new Set<RawTranscriptReseedReason>([
+  "auth-profile",
+  "auth-epoch",
 ]);
 
 /** Resolves how much prior transcript text may reseed a fresh CLI session. */
@@ -365,7 +383,7 @@ async function readBoundedCliSessionTranscript(
     // the new tail after EOF so a stale offset cannot discard valid history.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const currentSize = (await handle.stat()).size;
-      const readLength = Math.min(currentSize, MAX_CLI_SESSION_HISTORY_FILE_BYTES);
+      const readLength = Math.min(currentSize, MAX_CLI_SESSION_HISTORY_BYTES);
       position = Math.max(0, currentSize - readLength);
       buffer = Buffer.alloc(readLength);
       bytesRead = await readFileWindowFully(handle, buffer, position);
@@ -379,7 +397,7 @@ async function readBoundedCliSessionTranscript(
     }
 
     cliBackendLog.warn(
-      `cli session history truncated to last ${MAX_CLI_SESSION_HISTORY_FILE_BYTES} bytes: ${filePath}`,
+      `cli session history truncated to last ${MAX_CLI_SESSION_HISTORY_BYTES} bytes: ${filePath}`,
     );
     const firstLineEnd = tail.indexOf("\n");
     const completeTail = firstLineEnd >= 0 ? tail.slice(firstLineEnd + 1) : "";
@@ -474,7 +492,32 @@ function resolveSafeCliSessionFile(params: {
   };
 }
 
+/**
+ * Reads session entries from the transcript store.
+ *
+ * The legacy per-session JSONL file only exists on old single-agent installs;
+ * on a SQLite session store there is no such file, so the file loader below
+ * always raises ENOENT and reseed would silently carry no history at all.
+ */
 async function loadCliSessionEntries(params: {
+  sessionId: string;
+  sessionFile: string;
+  sessionKey?: string;
+  agentId?: string;
+  config?: OpenClawConfig;
+}): Promise<unknown[]> {
+  const fileEntries = await loadCliSessionEntriesFromFile(params);
+  if (fileEntries.length > 0) {
+    return fileEntries;
+  }
+  return await loadCliSessionEntriesFromStore(
+    params,
+    MAX_CLI_SESSION_HISTORY_ENTRIES,
+    projectLatestCliHistoryBoundary,
+  );
+}
+
+async function loadCliSessionEntriesFromFile(params: {
   sessionId: string;
   sessionFile: string;
   sessionKey?: string;
@@ -667,6 +710,21 @@ export async function loadCliSessionReseedMessages(params: {
   allowRawTranscriptReseed?: boolean;
   rawTranscriptReseedReason?: RawTranscriptReseedReason;
 }): Promise<unknown[]> {
+  if (
+    params.rawTranscriptReseedReason &&
+    AUTH_CROSSING_RESEED_REASONS.has(params.rawTranscriptReseedReason)
+  ) {
+    // Nothing transcript-derived crosses an auth boundary. The raw tail was
+    // already refused below by the allowlist, but the compacted branch returned
+    // a summary plus the post-compaction tail without consulting any reason at
+    // all -- and both are derived from turns the previous identity ran, the
+    // summary no less than the messages it was summarized from. Refusing here,
+    // before the load, also keeps a crossing from reading the transcript store.
+    cliBackendLog.warn(
+      `cli session history refused across auth boundary: reason=${params.rawTranscriptReseedReason} session=${params.sessionId}`,
+    );
+    return [];
+  }
   const entries = await loadCliSessionEntries(params);
   const loadRawTail = () => {
     if (

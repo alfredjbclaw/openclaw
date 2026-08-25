@@ -6,7 +6,11 @@
 import crypto from "node:crypto";
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import type { CliSessionBinding, SessionEntry } from "../config/sessions.js";
+import type {
+  CliSessionAuthIdentitySnapshot,
+  CliSessionBinding,
+  SessionEntry,
+} from "../config/sessions.js";
 import { normalizeCliSessionReseedReceipt } from "../config/sessions/cli-session-binding.js";
 import { readErrorName } from "../infra/errors.js";
 import { isFailoverError } from "./failover-error.js";
@@ -35,9 +39,22 @@ export function hashCliSessionText(value: string | undefined): string | undefine
   return crypto.createHash("sha256").update(trimmed).digest("hex");
 }
 
-/** Store a reusable CLI session ID without extra reuse guards. */
-export function setCliSessionId(entry: SessionEntry, provider: string, sessionId: string): void {
-  setCliSessionBinding(entry, provider, { sessionId });
+/**
+ * Store a reusable CLI session ID without extra reuse guards.
+ *
+ * `authIdentity` is the identity the run that produced `sessionId` executed
+ * under. Passing it is what keeps this fallback from writing an auth-less
+ * binding: a binding with no recorded identity has no auth boundary for
+ * `clearCliSession` to preserve, which is how a later clear used to erase the
+ * record outright and let the next turn raw-reseed prior-auth history.
+ */
+export function setCliSessionId(
+  entry: SessionEntry,
+  provider: string,
+  sessionId: string,
+  authIdentity?: CliSessionAuthIdentitySnapshot,
+): void {
+  setCliSessionBinding(entry, provider, { sessionId, ...authIdentity });
 }
 
 /** Store a CLI session binding and mirror it to legacy/simple session-id fields. */
@@ -47,7 +64,7 @@ export function setCliSessionBinding(
   binding: CliSessionBinding,
 ): void {
   const normalized = normalizeProviderId(provider);
-  const trimmed = binding.sessionId.trim();
+  const trimmed = normalizeOptionalString(binding.sessionId);
   if (!trimmed) {
     return;
   }
@@ -102,12 +119,144 @@ export function setCliSessionBinding(
   }
 }
 
-/** Remove the stored CLI session binding for one provider. */
-export function clearCliSession(entry: SessionEntry, provider: string): void {
+/**
+ * Reduces a cleared binding to the auth identity its transcript was written under.
+ *
+ * A finite `authEpochVersion` counts as auth identity on its own. An install
+ * with neither an auth profile nor a resolvable credential epoch has an empty
+ * identity, and a versioned record of that emptiness is still a tombstone: it
+ * is what lets the next turn tell "the identity is still empty" from "an
+ * identity appeared". This mirrors the reader in `cli-session-binding.ts`, which
+ * accepts a version-only record, and the sibling `toCurrentCliSessionAuthBoundary`,
+ * which writes one — the shape this PR itself persists on a `current`-provenance
+ * clear.
+ *
+ * Returns undefined only when the binding carried no profile, no epoch, and no
+ * finite version, which means the clear can erase the record outright.
+ */
+function toClearedCliSessionAuthBoundary(
+  binding: CliSessionBinding | undefined,
+): CliSessionBinding | undefined {
+  const authProfileId = normalizeOptionalString(binding?.authProfileId);
+  const authEpoch = normalizeOptionalString(binding?.authEpoch);
+  const authEpochVersion =
+    typeof binding?.authEpochVersion === "number" && Number.isFinite(binding.authEpochVersion)
+      ? binding.authEpochVersion
+      : undefined;
+  if (!authProfileId && !authEpoch && authEpochVersion === undefined) {
+    return undefined;
+  }
+  return {
+    ...(authProfileId ? { authProfileId } : {}),
+    ...(authEpoch ? { authEpoch } : {}),
+    ...(authEpochVersion !== undefined ? { authEpochVersion } : {}),
+  };
+}
+
+/**
+ * Reduces the clearing turn's own auth identity to a tombstone.
+ *
+ * Used only when the outgoing binding recorded no identity of its own. Note
+ * that an all-empty identity still yields a tombstone carrying `authEpochVersion`:
+ * "this transcript belongs to an install with no auth identity" is a fact worth
+ * recording, and it is what makes a later-appearing profile or epoch read as a
+ * crossing rather than as a session that was never bound.
+ */
+function toCurrentCliSessionAuthBoundary(
+  identity: CliSessionAuthIdentitySnapshot,
+): CliSessionBinding | undefined {
+  const authProfileId = normalizeOptionalString(identity.authProfileId);
+  const authEpoch = normalizeOptionalString(identity.authEpoch);
+  const boundary: CliSessionBinding = {
+    ...(authProfileId ? { authProfileId } : {}),
+    ...(authEpoch ? { authEpoch } : {}),
+    ...(typeof identity.authEpochVersion === "number" && Number.isFinite(identity.authEpochVersion)
+      ? { authEpochVersion: identity.authEpochVersion }
+      : {}),
+  };
+  return Object.keys(boundary).length > 0 ? boundary : undefined;
+}
+
+/**
+ * Auth provenance a clear can record when the outgoing binding recorded none.
+ *
+ * `current` carries the identity the clearing turn itself resolved, which is
+ * the only identity anyone can honestly attribute to a binding that never
+ * recorded one. `unknown` is reserved for the clear paths that run before the
+ * turn resolves its auth (a pre-run repair) or after it failed without ever
+ * getting that far; those keep the pre-existing erase-outright behavior rather
+ * than attribute an identity nobody resolved.
+ *
+ * Deliberately not a bare optional: an empty tombstone written on every
+ * auth-less clear would never match a run that does have an auth profile, so
+ * reuse resolution would answer `auth-profile` forever and refuse the reseed
+ * this whole path exists to allow (#124991). Callers must say which case they
+ * are in.
+ */
+export type CliSessionClearAuthProvenance =
+  | { kind: "current"; identity: CliSessionAuthIdentitySnapshot }
+  | { kind: "unknown" };
+
+/** Clear provenance for the paths that run outside a turn's resolved auth. */
+export const CLI_SESSION_CLEAR_AUTH_UNKNOWN: CliSessionClearAuthProvenance = { kind: "unknown" };
+
+/** Clear provenance from the identity the clearing turn resolved, when it has one. */
+export function cliSessionClearAuthFromRun(
+  identity: CliSessionAuthIdentitySnapshot | undefined,
+): CliSessionClearAuthProvenance {
+  return identity ? { kind: "current", identity } : CLI_SESSION_CLEAR_AUTH_UNKNOWN;
+}
+
+/**
+ * Remove the stored CLI session binding for one provider.
+ *
+ * Sole owner of binding removal: settlement (`clearCliSessionBinding` meta, both
+ * the command and auto-reply lanes), `clearCliSessionInStore`, and
+ * `clearCliSessionBindingForRun` all land here, so the auth-boundary invariant
+ * belongs here rather than at each caller. Erasing a binding outright would also
+ * erase the only record that this session's transcript belongs to a different
+ * auth identity, and the next turn would read the missing binding as "never
+ * bound" and raw-reseed prior-auth history. The resumable handle is what a clear
+ * must destroy, so it drops `sessionId` and the legacy mirrors while leaving an
+ * auth-boundary tombstone: reuse resolution still refuses to resume it, but it
+ * resolves as `auth-profile`/`auth-epoch` instead of `missing-transcript`.
+ *
+ * Two record shapes carry no identity of their own and so cannot source that
+ * tombstone from the outgoing binding: the legacy `cliSessionIds` /
+ * `claudeCliSessionId` rows that predate bindings, and a modern binding written
+ * by the bare-id fallback. Both take the tombstone from `currentAuth` instead —
+ * the identity the clearing turn is running under. Same identity next turn:
+ * reuse resolution reports no invalidation, the turn reads as unbound, and raw
+ * reseed proceeds. Changed identity: it reports the crossing and reseed is
+ * refused. That is the boundary this file promises, extended to the records
+ * that never recorded one.
+ */
+export function clearCliSession(
+  entry: SessionEntry,
+  provider: string,
+  currentAuth: CliSessionClearAuthProvenance,
+): void {
   const normalized = normalizeProviderId(provider);
-  if (entry.cliSessionBindings?.[normalized] !== undefined) {
+  const hadBinding = entry.cliSessionBindings?.[normalized] !== undefined;
+  const hadLegacyRow =
+    normalizeOptionalString(entry.cliSessionIds?.[normalized]) !== undefined ||
+    (normalized === CLAUDE_CLI_BACKEND_ID &&
+      normalizeOptionalString(entry.claudeCliSessionId) !== undefined);
+  const boundary =
+    toClearedCliSessionAuthBoundary(entry.cliSessionBindings?.[normalized]) ??
+    (currentAuth.kind === "current"
+      ? toCurrentCliSessionAuthBoundary(currentAuth.identity)
+      : undefined);
+  // A legacy row with no binding record still leaves a tombstone: erasing it
+  // is the same markerless delete, and it drops a session that reuse resolution
+  // would otherwise have reported as auth-invalidated.
+  if (hadBinding || (hadLegacyRow && boundary)) {
     const next = { ...entry.cliSessionBindings };
-    delete next[normalized];
+    if (boundary) {
+      next[normalized] = boundary;
+    } else {
+      delete next[normalized];
+    }
     entry.cliSessionBindings = Object.keys(next).length > 0 ? next : undefined;
   }
   if (entry.cliSessionIds?.[normalized] !== undefined) {
@@ -159,6 +308,44 @@ export type CliSessionReuseResult =
     }
   | { mode: "invalidate"; invalidatedReason: CliSessionInvalidatedReason };
 
+type CliSessionAuthIdentity = {
+  authProfileId?: string;
+  authEpoch?: string;
+  authEpochVersion: number;
+};
+
+/**
+ * Auth-identity half of reuse resolution.
+ *
+ * Shared with the cleared-binding path so an auth-boundary tombstone is judged
+ * by exactly the same rule as a live binding; a second copy of this comparison
+ * is how the boundary drifts out of sync.
+ */
+function resolveCliSessionAuthInvalidation(
+  binding: CliSessionBinding,
+  params: CliSessionAuthIdentity,
+): "auth-profile" | "auth-epoch" | undefined {
+  const currentAuthProfileId = normalizeOptionalString(params.authProfileId);
+  const currentAuthEpoch = normalizeOptionalString(params.authEpoch);
+  const storedAuthProfileId = normalizeOptionalString(binding.authProfileId);
+  const storedAuthEpoch = normalizeOptionalString(binding.authEpoch);
+  const hasMatchingVersionedAuthEpoch =
+    binding.authEpochVersion === params.authEpochVersion &&
+    storedAuthEpoch !== undefined &&
+    currentAuthEpoch !== undefined &&
+    storedAuthEpoch === currentAuthEpoch;
+  if (storedAuthProfileId !== currentAuthProfileId && !hasMatchingVersionedAuthEpoch) {
+    return "auth-profile";
+  }
+  if (
+    binding.authEpochVersion === params.authEpochVersion &&
+    storedAuthEpoch !== currentAuthEpoch
+  ) {
+    return "auth-epoch";
+  }
+  return undefined;
+}
+
 /** Decide whether a stored CLI session can be reused for the current auth/prompt/cwd/MCP state. */
 export function resolveCliSessionReuse(params: {
   binding?: CliSessionBinding;
@@ -175,36 +362,29 @@ export function resolveCliSessionReuse(params: {
   const binding = params.binding;
   const sessionId = normalizeOptionalString(binding?.sessionId);
   if (!sessionId) {
-    return { mode: "none" };
+    // No resumable handle. A binding record still present here is the
+    // auth-boundary tombstone `clearCliSession` leaves behind, and reporting its
+    // auth mismatch is what keeps the next turn's raw-reseed reason on the auth
+    // boundary instead of degrading to "never bound".
+    const clearedAuthInvalidation = binding
+      ? resolveCliSessionAuthInvalidation(binding, params)
+      : undefined;
+    return clearedAuthInvalidation
+      ? { mode: "invalidate", invalidatedReason: clearedAuthInvalidation }
+      : { mode: "none" };
   }
   if (binding?.forceReuse === true) {
     return { mode: "reuse", sessionId };
   }
-  const currentAuthProfileId = normalizeOptionalString(params.authProfileId);
-  const currentAuthEpoch = normalizeOptionalString(params.authEpoch);
   const currentExtraSystemPromptHash = normalizeOptionalString(params.extraSystemPromptHash);
   const currentMessageToolPolicyHash = normalizeOptionalString(params.messageToolPolicyHash);
   const currentPromptToolNamesHash = normalizeOptionalString(params.promptToolNamesHash);
   const currentCwdHash = normalizeOptionalString(params.cwdHash);
   const currentMcpConfigHash = normalizeOptionalString(params.mcpConfigHash);
   const currentMcpResumeHash = normalizeOptionalString(params.mcpResumeHash);
-  const storedAuthProfileId = normalizeOptionalString(binding?.authProfileId);
-  const storedAuthEpoch = normalizeOptionalString(binding?.authEpoch);
-  const hasMatchingVersionedAuthEpoch =
-    binding?.authEpochVersion === params.authEpochVersion &&
-    storedAuthEpoch !== undefined &&
-    currentAuthEpoch !== undefined &&
-    storedAuthEpoch === currentAuthEpoch;
-  if (storedAuthProfileId !== currentAuthProfileId) {
-    if (!hasMatchingVersionedAuthEpoch) {
-      return { mode: "invalidate", invalidatedReason: "auth-profile" };
-    }
-  }
-  if (
-    binding?.authEpochVersion === params.authEpochVersion &&
-    storedAuthEpoch !== currentAuthEpoch
-  ) {
-    return { mode: "invalidate", invalidatedReason: "auth-epoch" };
+  const authInvalidation = binding ? resolveCliSessionAuthInvalidation(binding, params) : undefined;
+  if (authInvalidation) {
+    return { mode: "invalidate", invalidatedReason: authInvalidation };
   }
   const storedMessageToolPolicyHash = normalizeOptionalString(binding?.messageToolPolicyHash);
   if (storedMessageToolPolicyHash !== currentMessageToolPolicyHash) {

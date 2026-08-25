@@ -3,6 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { withTestAdmittedRunContext } from "../../agents/admitted-run-context.test-support.js";
+import { CLI_SESSION_CLEAR_AUTH_UNKNOWN } from "../../agents/cli-session.js";
 import type { EmbeddedAgentRunResult } from "../../agents/embedded-agent-runner/types.js";
 import { FailoverError } from "../../agents/failover-error.js";
 import { createAgentRunRestartAbortError } from "../../agents/run-termination.js";
@@ -691,6 +692,7 @@ describe("clearCliSessionBindingForRun", () => {
       sessionStore: { main: storedEntry },
       storePath,
       activeSessionEntry: activeEntry,
+      clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
     });
 
     for (const entry of [activeEntry, storedEntry]) {
@@ -718,6 +720,7 @@ describe("clearCliSessionBindingForRun", () => {
       provider: "claude-cli",
       expectedSessionId: "stale-session",
       activeSessionEntry: entry,
+      clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
     });
 
     expect(entry.cliSessionBindings["claude-cli"].sessionId).toBe("replacement-session");

@@ -16,9 +16,11 @@ import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import {
   clearAllCliSessions,
   clearCliSession,
+  cliSessionClearAuthFromRun,
   getCliSessionBinding,
   setCliSessionBinding,
   setCliSessionId,
+  type CliSessionClearAuthProvenance,
 } from "../cli-session.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../defaults.js";
 import type { EmbeddedAgentCompactResult } from "../embedded-agent-runner/types.js";
@@ -181,14 +183,15 @@ export async function updateSessionStoreAfterAgentRun(params: {
     }
     if (!preserveRuntimeModel && isCliProvider(providerUsed, cfg)) {
       const cliSessionBinding = result.meta.agentMeta?.cliSessionBinding;
+      const cliSessionAuthIdentity = result.meta.agentMeta?.cliSessionAuthIdentity;
       if (result.meta.agentMeta?.clearCliSessionBinding === true) {
-        clearCliSession(next, providerUsed);
+        clearCliSession(next, providerUsed, cliSessionClearAuthFromRun(cliSessionAuthIdentity));
       } else if (cliSessionBinding?.sessionId?.trim()) {
         setCliSessionBinding(next, providerUsed, cliSessionBinding);
       } else {
         const cliSessionId = result.meta.agentMeta?.sessionId?.trim();
         if (cliSessionId) {
-          setCliSessionId(next, providerUsed, cliSessionId);
+          setCliSessionId(next, providerUsed, cliSessionId, cliSessionAuthIdentity);
         }
       }
     }
@@ -328,6 +331,8 @@ export async function clearCliSessionInStore(params: {
   storePath: string;
   expectedSessionId?: string;
   expectedCliSessionId?: string;
+  /** Auth identity the clearing turn resolved; see `clearCliSession`. */
+  clearAuthProvenance: CliSessionClearAuthProvenance;
 }): Promise<SessionEntry | undefined> {
   const { provider, sessionKey, sessionStore, storePath, expectedSessionId, expectedCliSessionId } =
     params;
@@ -356,7 +361,7 @@ export async function clearCliSessionInStore(params: {
         return null;
       }
       const next = { ...currentEntry };
-      clearCliSession(next, provider);
+      clearCliSession(next, provider, params.clearAuthProvenance);
       next.updatedAt = Date.now();
       didClear = true;
       return next;

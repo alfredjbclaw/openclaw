@@ -15,6 +15,11 @@ import {
   replaceSessionEntry,
 } from "../../config/sessions/session-accessor.js";
 import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
+import {
+  CLI_SESSION_CLEAR_AUTH_UNKNOWN,
+  getCliSessionBinding,
+  resolveCliSessionReuse,
+} from "../cli-session.js";
 import type { EmbeddedAgentRunResult } from "../embedded-agent.js";
 import {
   clearCliSessionInStore,
@@ -784,7 +789,14 @@ describe("updateSessionStoreAfterAgentRun", () => {
         result,
       });
 
-      expect(sessionStore[sessionKey]?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      // The resumable handle and its legacy mirrors are destroyed, but the auth
+      // identity the transcript was written under survives as the auth-boundary
+      // tombstone `clearCliSession` owns. Erasing the record outright would let
+      // the next turn read the session as never bound and raw-reseed prior-auth
+      // history under `missing-transcript`.
+      expect(sessionStore[sessionKey]?.cliSessionBindings?.["claude-cli"]).toEqual({
+        authEpoch: "old-epoch",
+      });
       expect(sessionStore[sessionKey]?.cliSessionBindings?.["codex-cli"]).toEqual({
         sessionId: "codex-session",
       });
@@ -793,7 +805,9 @@ describe("updateSessionStoreAfterAgentRun", () => {
       expect(sessionStore[sessionKey]?.claudeCliSessionId).toBeUndefined();
 
       const persisted = loadPersistedSessionStore(storePath);
-      expect(persisted[sessionKey]?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      expect(persisted[sessionKey]?.cliSessionBindings?.["claude-cli"]).toEqual({
+        authEpoch: "old-epoch",
+      });
       expect(persisted[sessionKey]?.cliSessionIds?.["claude-cli"]).toBeUndefined();
       expect(persisted[sessionKey]?.claudeCliSessionId).toBeUndefined();
     });
@@ -3155,9 +3169,13 @@ describe("clearCliSessionInStore", () => {
         sessionKey,
         sessionStore,
         storePath,
+        clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
       });
 
-      expect(cleared?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      // The clear destroys the resumable handle and the legacy mirrors, and
+      // leaves the auth-boundary tombstone that carries the auth identity the
+      // transcript was written under.
+      expect(cleared?.cliSessionBindings?.["claude-cli"]).toEqual({ authEpoch: "epoch-1" });
       expect(cleared?.cliSessionBindings?.["codex-cli"]).toEqual({
         sessionId: "codex-session-1",
       });
@@ -3167,13 +3185,28 @@ describe("clearCliSessionInStore", () => {
       expect(sessionStore[sessionKey]).toEqual(cleared);
 
       const persisted = loadPersistedSessionEntry(storePath, sessionKey);
-      expect(persisted?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      expect(persisted?.cliSessionBindings?.["claude-cli"]).toEqual({ authEpoch: "epoch-1" });
       expect(persisted?.cliSessionBindings?.["codex-cli"]).toEqual({
         sessionId: "codex-session-1",
       });
       expect(persisted?.cliSessionIds?.["claude-cli"]).toBeUndefined();
       expect(persisted?.cliSessionIds?.["codex-cli"]).toBe("codex-session-1");
       expect(persisted?.claudeCliSessionId).toBeUndefined();
+
+      // What survives the merge has to still be the boundary, not just bytes:
+      // the persisted row resumes nothing, and the next turn under a different
+      // auth identity resolves it as `auth-profile` rather than `{mode:"none"}`,
+      // which is what keeps prepare off the `missing-transcript` raw-reseed path.
+      const persistedBinding = getCliSessionBinding(persisted, "claude-cli");
+      expect(persistedBinding?.sessionId).toBeUndefined();
+      expect(
+        resolveCliSessionReuse({
+          binding: persistedBinding,
+          authProfileId: "anthropic:new-profile",
+          authEpoch: "epoch-2",
+          authEpochVersion: 1,
+        }),
+      ).toEqual({ mode: "invalidate", invalidatedReason: "auth-profile" });
     });
   });
 
@@ -3194,6 +3227,7 @@ describe("clearCliSessionInStore", () => {
         sessionKey: "agent:main:explicit:missing",
         sessionStore,
         storePath,
+        clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
       });
 
       expect(cleared).toBeUndefined();
@@ -3234,13 +3268,17 @@ describe("clearCliSessionInStore", () => {
         sessionKey,
         sessionStore,
         storePath,
+        clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
       });
 
       const persisted = loadPersistedSessionEntry(storePath, sessionKey);
       expect(cleared?.sessionId).toBe("openclaw-session-1");
       expect(cleared?.modelProvider).toBe("anthropic");
       expect(cleared?.model).toBe("claude-opus-4-6");
-      expect(cleared?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      // A recreated row is still a complete row: the auth-boundary tombstone is
+      // part of what the recreation has to carry, or the boundary is lost exactly
+      // on the path that already lost the stored row.
+      expect(cleared?.cliSessionBindings?.["claude-cli"]).toEqual({ authEpoch: "epoch-1" });
       expect(cleared?.cliSessionBindings?.["codex-cli"]).toEqual({
         sessionId: "codex-session-1",
       });
@@ -3249,7 +3287,7 @@ describe("clearCliSessionInStore", () => {
       expect(persisted?.sessionId).toBe("openclaw-session-1");
       expect(persisted?.modelProvider).toBe("anthropic");
       expect(persisted?.model).toBe("claude-opus-4-6");
-      expect(persisted?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      expect(persisted?.cliSessionBindings?.["claude-cli"]).toEqual({ authEpoch: "epoch-1" });
       expect(persisted?.cliSessionBindings?.["codex-cli"]).toEqual({
         sessionId: "codex-session-1",
       });
@@ -3275,6 +3313,7 @@ describe("clearCliSessionInStore", () => {
         sessionStore,
         storePath,
         expectedSessionId: sessionId,
+        clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
       });
 
       expect(loadPersistedSessionEntry(storePath, sessionKey)).toBeUndefined();

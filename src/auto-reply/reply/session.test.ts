@@ -4972,7 +4972,15 @@ describe("persistSessionUsageUpdate", () => {
       },
       expected: {
         cliSessionIds: { "codex-cli": "codex-session" },
-        cliSessionBindings: { "codex-cli": { sessionId: "codex-session" } },
+        // The clear destroys the resumable handle and the legacy mirrors, and
+        // leaves the auth-boundary tombstone `clearCliSession` owns: the auth
+        // identity this transcript was written under has to survive the clear,
+        // or the next turn reads the session as never bound and raw-reseeds
+        // prior-auth history under `missing-transcript`.
+        cliSessionBindings: {
+          "claude-cli": { authProfileId: "anthropic:old" },
+          "codex-cli": { sessionId: "codex-session" },
+        },
         claudeCliSessionId: undefined,
       },
     },

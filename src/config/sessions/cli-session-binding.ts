@@ -99,6 +99,49 @@ export function getCliSessionBinding(
   if (normalizedFromMap) {
     return { sessionId: normalizedFromMap };
   }
+  // A binding record with no session id is the auth-boundary tombstone
+  // `clearCliSession` leaves behind. It must still reach reuse resolution, which
+  // is the only thing that can tell "never bound" apart from "bound under a
+  // different auth identity". Checked after the legacy maps so a real id always
+  // wins.
+  //
+  // Because it resumes nothing, any caller that reads the result as "a native
+  // transcript exists" MUST gate on `sessionId` — a truthiness test admits the
+  // tombstone. This is not something the return type enforces, and it has been
+  // gotten wrong repeatedly; the gates live in `hasProviderOwnedSession`
+  // (`entry-freshness.ts`), its reply-lane twin (`auto-reply/reply/session.ts`),
+  // `resolveManualCompactionCliTarget` (`agents/session-runtime-compat.ts`),
+  // `resolveEligibleCliSessionBinding` (`gateway/cli-session-history.ts`), and
+  // `gateway/agent-turn/agent-handler-helpers.ts`. Reuse resolution and
+  // auth-provenance readers are the deliberate exceptions: they want the
+  // tombstone precisely because it has no id — `resolveManualCompactionCliTarget`
+  // still returns one as `cliSessionBinding` while reporting `cliSessionId`
+  // undefined, which is the shape those readers expect. Any new caller has to
+  // pick a side explicitly.
+  const clearedAuthProfileId = normalizeOptionalString(fromBindings?.authProfileId);
+  const clearedAuthEpoch = normalizeOptionalString(fromBindings?.authEpoch);
+  // The epoch version alone still identifies a tombstone: an install with
+  // neither an auth profile nor a resolvable credential epoch has an empty
+  // identity, and a versioned record of that emptiness is what lets the next
+  // turn tell "the identity is still empty" (reuse resolution returns no
+  // invalidation, so raw reseed stays eligible) from "an identity appeared"
+  // (reuse resolution reports the crossing and reseed is refused). Older
+  // readers, which required a profile or epoch here, simply fall through to
+  // `undefined` and behave exactly as they did before the field existed.
+  const clearedAuthEpochVersion =
+    typeof fromBindings?.authEpochVersion === "number" &&
+    Number.isFinite(fromBindings.authEpochVersion)
+      ? fromBindings.authEpochVersion
+      : undefined;
+  if (clearedAuthProfileId || clearedAuthEpoch || clearedAuthEpochVersion !== undefined) {
+    return {
+      ...(clearedAuthProfileId ? { authProfileId: clearedAuthProfileId } : {}),
+      ...(clearedAuthEpoch ? { authEpoch: clearedAuthEpoch } : {}),
+      ...(clearedAuthEpochVersion !== undefined
+        ? { authEpochVersion: clearedAuthEpochVersion }
+        : {}),
+    };
+  }
   if (normalized === CLAUDE_CLI_BACKEND_ID) {
     // Keep accepting the shipped Claude-only field until stored sessions migrate.
     const legacy = normalizeOptionalString(entry.claudeCliSessionId);
