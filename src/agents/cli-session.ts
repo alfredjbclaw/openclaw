@@ -178,20 +178,42 @@ function toCurrentCliSessionAuthBoundary(
 }
 
 /**
+ * Reduces an unattributable clear to a tombstone that refuses reseed outright.
+ *
+ * Used when the outgoing binding recorded no identity *and* the clearing path
+ * ran outside a turn's resolved auth, so no identity can honestly be attributed
+ * to the transcript. The marker is deliberately not identity-shaped: an
+ * identity-shaped tombstone is compared against the next turn's identity and can
+ * match it, and a transcript nobody can attribute must never match anything.
+ * Reuse resolution maps this to `auth-unknown`, which every transcript-reseed
+ * branch refuses.
+ */
+function toUnknownCliSessionAuthBoundary(): CliSessionBinding {
+  return { clearedAuthProvenance: "unknown" };
+}
+
+/**
  * Auth provenance a clear can record when the outgoing binding recorded none.
  *
  * `current` carries the identity the clearing turn itself resolved, which is
  * the only identity anyone can honestly attribute to a binding that never
- * recorded one. `unknown` is reserved for the clear paths that run before the
- * turn resolves its auth (a pre-run repair) or after it failed without ever
- * getting that far; those keep the pre-existing erase-outright behavior rather
- * than attribute an identity nobody resolved.
+ * recorded one. `unknown` is for the clear paths that run before the turn
+ * resolves its auth (a pre-run repair, or a handled `before_agent_reply`
+ * synthetic turn that returns before CLI preparation) or after it failed without
+ * ever getting that far.
  *
- * Deliberately not a bare optional: an empty tombstone written on every
+ * `unknown` fails closed: it records an explicit unknown-provenance tombstone
+ * rather than erasing the record. Erasing it is what let the next turn read the
+ * session as never-bound, take the `missing-transcript` reseed path, and hand a
+ * later, different auth identity the prior identity's transcript. Refusing one
+ * history reseed is the correct price for a transcript nobody can attribute.
+ *
+ * Deliberately not a bare optional, and the `unknown` tombstone is deliberately
+ * not an empty/identity-shaped record: an empty tombstone written on every
  * auth-less clear would never match a run that does have an auth profile, so
  * reuse resolution would answer `auth-profile` forever and refuse the reseed
  * this whole path exists to allow (#124991). Callers must say which case they
- * are in.
+ * are in, and the two cases persist distinguishable shapes.
  */
 export type CliSessionClearAuthProvenance =
   | { kind: "current"; identity: CliSessionAuthIdentitySnapshot }
@@ -224,12 +246,22 @@ export function cliSessionClearAuthFromRun(
  * Two record shapes carry no identity of their own and so cannot source that
  * tombstone from the outgoing binding: the legacy `cliSessionIds` /
  * `claudeCliSessionId` rows that predate bindings, and a modern binding written
- * by the bare-id fallback. Both take the tombstone from `currentAuth` instead —
- * the identity the clearing turn is running under. Same identity next turn:
- * reuse resolution reports no invalidation, the turn reads as unbound, and raw
- * reseed proceeds. Changed identity: it reports the crossing and reseed is
- * refused. That is the boundary this file promises, extended to the records
- * that never recorded one.
+ * by the bare-id fallback. Both take the tombstone from `currentAuth` instead.
+ * With `current` provenance that is the identity the clearing turn is running
+ * under. Same identity next turn: reuse resolution reports no invalidation, the
+ * turn reads as unbound, and raw reseed proceeds. Changed identity: it reports
+ * the crossing and reseed is refused. That is the boundary this file promises,
+ * extended to the records that never recorded one.
+ *
+ * With `unknown` provenance there is no identity to record, and the tombstone
+ * says exactly that. Deleting the record instead is what let the next turn read
+ * `{mode:"none"}`, default to `missing-transcript`, and reseed the prior
+ * identity's transcript under whichever identity showed up next. The
+ * unknown-provenance tombstone resolves as `auth-unknown`, which both reseed
+ * branches refuse. It suppresses history for exactly one fresh prompt: the next
+ * successful run writes a real binding with a session id and current auth, which
+ * replaces it. Native resume is untouched — the tombstone never carried a
+ * resumable handle to begin with.
  */
 export function clearCliSession(
   entry: SessionEntry,
@@ -246,7 +278,7 @@ export function clearCliSession(
     toClearedCliSessionAuthBoundary(entry.cliSessionBindings?.[normalized]) ??
     (currentAuth.kind === "current"
       ? toCurrentCliSessionAuthBoundary(currentAuth.identity)
-      : undefined);
+      : toUnknownCliSessionAuthBoundary());
   // A legacy row with no binding record still leaves a tombstone: erasing it
   // is the same markerless delete, and it drops a session that reuse resolution
   // would otherwise have reported as auth-invalidated.
@@ -294,7 +326,13 @@ export function resolveCliSessionClearReason(error: unknown): string {
   return isFailoverError(error) ? error.reason : (readErrorName(error) ?? "error");
 }
 
-type CliSessionInvalidatedReason = "auth-profile" | "auth-epoch" | "message-policy" | "cwd" | "mcp";
+type CliSessionInvalidatedReason =
+  | "auth-profile"
+  | "auth-epoch"
+  | "auth-unknown"
+  | "message-policy"
+  | "cwd"
+  | "mcp";
 
 type CliSessionContentDriftReason = "system-prompt" | "prompt-tools";
 
@@ -366,6 +404,14 @@ export function resolveCliSessionReuse(params: {
     // auth-boundary tombstone `clearCliSession` leaves behind, and reporting its
     // auth mismatch is what keeps the next turn's raw-reseed reason on the auth
     // boundary instead of degrading to "never bound".
+    if (binding?.clearedAuthProvenance === "unknown") {
+      // Unknown provenance is checked before the identity comparison and answers
+      // unconditionally: this tombstone carries no identity fields, so comparing
+      // it would report "identity unchanged" against a turn that also resolves
+      // none, and the transcript would reseed under an identity nobody can prove
+      // wrote it.
+      return { mode: "invalidate", invalidatedReason: "auth-unknown" };
+    }
     const clearedAuthInvalidation = binding
       ? resolveCliSessionAuthInvalidation(binding, params)
       : undefined;

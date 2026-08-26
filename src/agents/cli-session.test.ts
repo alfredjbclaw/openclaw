@@ -616,7 +616,9 @@ describe("cli-session helpers", () => {
     setCliSessionBinding(entry, "codex-cli", { sessionId: "codex-session" });
 
     clearCliSession(entry, "codex-cli", CLI_SESSION_CLEAR_AUTH_UNKNOWN);
-    expect(getCliSessionBinding(entry, "codex-cli")).toBeUndefined();
+    // Provider-scoped: the cleared provider keeps only its tombstone (no
+    // resumable handle), and the untouched provider keeps its live session.
+    expect(getCliSessionBinding(entry, "codex-cli")?.sessionId).toBeUndefined();
     expect(getCliSessionBinding(entry, "claude-cli")?.sessionId).toBe("claude-session");
 
     clearAllCliSessions(entry);
@@ -675,7 +677,7 @@ describe("cli-session helpers", () => {
     ).toEqual({ mode: "none" });
   });
 
-  it("still erases a cleared binding that recorded no auth identity at all", () => {
+  it("tombstones a cleared binding that recorded no auth identity at all", () => {
     const entry: SessionEntry = {
       sessionId: "openclaw-session",
       updatedAt: Date.now(),
@@ -684,11 +686,28 @@ describe("cli-session helpers", () => {
 
     clearCliSession(entry, "codex-cli", CLI_SESSION_CLEAR_AUTH_UNKNOWN);
 
-    // No profile, no epoch, no finite version: an empty tombstone would never
-    // match a profiled run, so reuse resolution would answer `auth-profile`
-    // forever and refuse the reseed #124991 exists to allow. Erase outright.
-    expect(getCliSessionBinding(entry, "codex-cli")).toBeUndefined();
-    expect(entry.cliSessionBindings).toBeUndefined();
+    // No profile, no epoch, no finite version, and a clearing path that never
+    // resolved auth: nobody can say which identity wrote this transcript.
+    // Erasing the record makes the next turn read the session as never-bound
+    // and reseed it under whichever identity arrives, so the clear records the
+    // ambiguity instead. The marker is deliberately not identity-shaped — an
+    // empty *identity* tombstone would never match a profiled run and would
+    // answer `auth-profile` forever, refusing the reseed #124991 exists to
+    // allow. This one answers `auth-unknown`, which every reseed branch refuses
+    // and which the next successful run replaces with a real binding.
+    expect(entry.cliSessionBindings?.["codex-cli"]).toStrictEqual({
+      clearedAuthProvenance: "unknown",
+    });
+    expect(getCliSessionBinding(entry, "codex-cli")).toStrictEqual({
+      clearedAuthProvenance: "unknown",
+    });
+    expect(
+      resolveCliSessionReuse({
+        binding: getCliSessionBinding(entry, "codex-cli"),
+        authProfileId: "anthropic:whoever-shows-up-next",
+        authEpochVersion: 2,
+      }),
+    ).toEqual({ mode: "invalidate", invalidatedReason: "auth-unknown" });
   });
 
   it("hashes trimmed extra system prompts consistently", () => {

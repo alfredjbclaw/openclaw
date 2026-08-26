@@ -69,6 +69,7 @@ type HistoryEntry = {
 type RawTranscriptReseedReason =
   | "auth-profile"
   | "auth-epoch"
+  | "auth-unknown"
   | "message-policy"
   | "system-prompt"
   | "cwd"
@@ -88,19 +89,25 @@ const RAW_TRANSCRIPT_RESEED_ALLOWED_REASONS = new Set<RawTranscriptReseedReason>
 ]);
 
 /**
- * Reseed reasons that say this turn resolved a different auth identity than the
- * one the stored transcript was written under.
+ * Reseed reasons that refuse every transcript-derived reseed on auth grounds:
+ * either this turn resolved a different auth identity than the one the stored
+ * transcript was written under (`auth-profile`, `auth-epoch`), or nobody can say
+ * which identity it was written under at all (`auth-unknown`, the tombstone a
+ * clear leaves when it runs outside a turn's resolved auth). The last one fails
+ * closed by construction: an unattributable transcript is treated as if it were
+ * known to be someone else's.
  *
- * Both are already absent from `RAW_TRANSCRIPT_RESEED_ALLOWED_REASONS`, which is
- * what refuses a raw tail across the boundary. They are named again here because
- * the compacted branch needs the same answer for its own reason, and "absent
- * from the raw allowlist" is the wrong test to reuse: a reason may be kept off
- * that allowlist for reasons that have nothing to do with auth, and the
+ * All three are also absent from `RAW_TRANSCRIPT_RESEED_ALLOWED_REASONS`, which
+ * is what refuses a raw tail across the boundary. They are named again here
+ * because the compacted branch needs the same answer for its own reason, and
+ * "absent from the raw allowlist" is the wrong test to reuse: a reason may be
+ * kept off that allowlist for reasons that have nothing to do with auth, and the
  * compacted branch would then refuse content it has no cause to refuse.
  */
 const AUTH_CROSSING_RESEED_REASONS = new Set<RawTranscriptReseedReason>([
   "auth-profile",
   "auth-epoch",
+  "auth-unknown",
 ]);
 
 /** Resolves how much prior transcript text may reseed a fresh CLI session. */

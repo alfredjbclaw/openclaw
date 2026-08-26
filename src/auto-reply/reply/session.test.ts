@@ -4922,7 +4922,13 @@ describe("persistSessionUsageUpdate", () => {
         modelProvider: "openai",
         model: "gpt-5.4",
         cliSessionIds: { "codex-cli": "codex-cli-session" },
-        cliSessionBindings: { "codex-cli": { sessionId: "codex-cli-session" } },
+        cliSessionBindings: {
+          // The cleared provider keeps an unknown-provenance tombstone: this
+          // update carries no `cliSessionAuthIdentity` and the outgoing binding
+          // recorded none, so no identity can be attributed to its transcript.
+          "claude-cli": { clearedAuthProvenance: "unknown" },
+          "codex-cli": { sessionId: "codex-cli-session" },
+        },
         claudeCliSessionId: undefined,
       },
     },

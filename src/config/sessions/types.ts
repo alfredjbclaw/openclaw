@@ -153,6 +153,16 @@ export type CliSessionBinding = {
   authProfileId?: string;
   authEpoch?: string;
   authEpochVersion?: number;
+  /**
+   * Present only on the tombstone `clearCliSession` writes when it cannot honestly
+   * name the auth identity the cleared transcript belonged to: the outgoing binding
+   * recorded none, and the clearing path ran outside a turn's resolved auth. It is
+   * deliberately distinguishable from a real identity boundary — an identity-shaped
+   * tombstone would be compared against the next turn's identity and could match,
+   * whereas this one must always refuse. Reuse resolution maps it to `auth-unknown`,
+   * which every transcript-reseed branch refuses.
+   */
+  clearedAuthProvenance?: "unknown";
   extraSystemPromptHash?: string;
   messageToolPolicyHash?: string;
   promptToolNamesHash?: string;

@@ -695,14 +695,22 @@ describe("clearCliSessionBindingForRun", () => {
       clearAuthProvenance: CLI_SESSION_CLEAR_AUTH_UNKNOWN,
     });
 
+    // The resumable handle is what a clear must destroy — the session id and
+    // both legacy mirrors. The record itself stays as an unknown-provenance
+    // tombstone: this binding recorded no identity and the clear resolved none,
+    // so erasing it would let the next turn read the session as never-bound.
     for (const entry of [activeEntry, storedEntry]) {
-      expect(entry.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+      expect(entry.cliSessionBindings?.["claude-cli"]).toStrictEqual({
+        clearedAuthProvenance: "unknown",
+      });
       expect(entry.cliSessionIds?.["claude-cli"]).toBeUndefined();
       expect(entry.claudeCliSessionId).toBeUndefined();
       expect(entry.updatedAt).toBeGreaterThan(1);
     }
     const persisted = loadSessionEntry({ storePath, sessionKey: "main" });
-    expect(persisted?.cliSessionBindings?.["claude-cli"]).toBeUndefined();
+    expect(persisted?.cliSessionBindings?.["claude-cli"]).toStrictEqual({
+      clearedAuthProvenance: "unknown",
+    });
     expect(persisted?.cliSessionIds?.["claude-cli"]).toBeUndefined();
     expect(persisted?.claudeCliSessionId).toBeUndefined();
   });

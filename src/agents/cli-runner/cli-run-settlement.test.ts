@@ -259,19 +259,23 @@ describe("clears record the current auth identity when the binding recorded none
   });
 
   it("never fabricates an identity for a clear that resolved none", () => {
-    // The trap: an always-on empty marker would answer `auth-profile` against
-    // every run that has a profile, refusing the reseed on every bare-binding
-    // clear — #124991 again. A clear with unknown provenance keeps the old
-    // erase instead of inventing a boundary nobody resolved.
+    // The trap: an identity-shaped tombstone written here would be *compared*
+    // against the next turn's identity, and an empty one answers `auth-profile`
+    // against every run that has a profile — refusing the reseed on every
+    // bare-binding clear, which is #124991 again. So the unknown-provenance
+    // tombstone carries no identity fields at all; it is recognized by its own
+    // marker and answers `auth-unknown`, which is not an identity comparison.
     const entry = { sessionId: "s1" } as SessionEntry;
     setCliSessionId(entry, "claude-cli", "sid-bare");
 
     clearCliSession(entry, "claude-cli", CLI_SESSION_CLEAR_AUTH_UNKNOWN);
 
-    expect(entry.cliSessionBindings).toBeUndefined();
+    expect(entry.cliSessionBindings?.["claude-cli"]).toStrictEqual({
+      clearedAuthProvenance: "unknown",
+    });
     expect(
       reuseAfterClear(entry, { authProfileId: "anthropic:current", authEpochVersion: 1 }),
-    ).toEqual({ mode: "none" });
+    ).toEqual({ mode: "invalidate", invalidatedReason: "auth-unknown" });
   });
 
   it("prefers the binding's own identity over the clearing turn's", () => {

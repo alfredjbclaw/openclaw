@@ -1748,9 +1748,10 @@ async function prepareCliRunContextWithinReadFence(
     // because `clearCliSession` — the single owner every clear path lands on — leaves an
     // auth-boundary tombstone instead of erasing the binding: `{mode:"none"}` therefore
     // never stands for an erased auth boundary, which still resolves here as
-    // `auth-profile`/`auth-epoch`. Those two reasons are refused by
-    // `loadCliSessionReseedMessages` for every branch it has -- the raw tail via
-    // the allowlist, and the compacted summary plus tail via the auth-crossing
+    // `auth-profile`/`auth-epoch`, or as `auth-unknown` when the clear ran outside a
+    // turn's resolved auth and could not name an identity at all. Those three reasons
+    // are refused by `loadCliSessionReseedMessages` for every branch it has -- the raw
+    // tail via the allowlist, and the compacted summary plus tail via the auth-crossing
     // check that runs before the load.
     const rawTranscriptReseedReason = reusableCliSessionId
       ? "session-expired"

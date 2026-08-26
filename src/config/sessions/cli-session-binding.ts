@@ -133,13 +133,25 @@ export function getCliSessionBinding(
     Number.isFinite(fromBindings.authEpochVersion)
       ? fromBindings.authEpochVersion
       : undefined;
-  if (clearedAuthProfileId || clearedAuthEpoch || clearedAuthEpochVersion !== undefined) {
+  // An unknown-provenance tombstone carries no identity fields at all, so it has
+  // to be recognized by its own marker: compared as an identity it would read as
+  // "empty identity" and could match a current turn that also resolves none,
+  // which is exactly the match it must never make.
+  const clearedAuthProvenance =
+    fromBindings?.clearedAuthProvenance === "unknown" ? ("unknown" as const) : undefined;
+  if (
+    clearedAuthProfileId ||
+    clearedAuthEpoch ||
+    clearedAuthEpochVersion !== undefined ||
+    clearedAuthProvenance
+  ) {
     return {
       ...(clearedAuthProfileId ? { authProfileId: clearedAuthProfileId } : {}),
       ...(clearedAuthEpoch ? { authEpoch: clearedAuthEpoch } : {}),
       ...(clearedAuthEpochVersion !== undefined
         ? { authEpochVersion: clearedAuthEpochVersion }
         : {}),
+      ...(clearedAuthProvenance ? { clearedAuthProvenance } : {}),
     };
   }
   if (normalized === CLAUDE_CLI_BACKEND_ID) {
