@@ -63,6 +63,7 @@ const repositoryScriptEntries = [
   "scripts/e2e/lib/release-user-journey/write-clickclack-plugin.mjs!",
   "scripts/e2e/lib/run-with-pty.mjs!",
   "scripts/e2e/lib/sandbox-browser-sidecar/scenario.mjs!",
+  "scripts/e2e/lib/upgrade-survivor/config-parking.mjs!",
   "scripts/e2e/lib/upgrade-survivor/probe-gateway.mjs!",
   "scripts/embedded-run-abort-leak.ts!",
   "scripts/fixtures/packed-plugin-sdk-type-smoke.ts!",
@@ -96,6 +97,8 @@ const repositoryScriptEntries = [
   "scripts/secrets/openclaw-bws-resolver.mjs!",
   "scripts/sync-labels.ts!",
   "scripts/test-built-bundled-channel-entry-smoke.mts!",
+  // Native shell UI tests connect to this manually launched loopback Gateway fixture.
+  "scripts/test-ios-shell-gateway.mjs!",
   "scripts/update-clawtributors.ts!",
   "scripts/verify-stable-main-closeout.mjs!",
   "scripts/write-package-dist-inventory.ts!",
@@ -725,6 +728,10 @@ const config = {
       "harness.ts!",
       "media-understanding-provider.ts!",
     ]),
+    [`${BUNDLED_PLUGIN_ROOT_DIR}/daytona`]: bundledPluginWorkspace([
+      // Copied to dist and spawned by the Daytona backend for sandbox execs.
+      "src/daytona-exec-launcher.mjs!",
+    ]),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/deepgram`]: bundledPluginWorkspace(),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/deepinfra`]: bundledPluginWorkspace(),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/discord`]: bundledPluginWorkspace(),
@@ -749,13 +756,14 @@ const config = {
     [`${BUNDLED_PLUGIN_ROOT_DIR}/kilocode`]: bundledPluginWorkspace(),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/kimi-coding`]: bundledPluginWorkspace(),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/matrix`]: bundledPluginWorkspace([
-      // Native import wrapper shipped alongside the Matrix runtime bundle.
-      "src/plugin-entry.runtime.js!",
       // The monitor lazy-loads outbound behavior on inbound-only processes.
       "src/matrix/send.ts!",
     ]),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/microsoft`]: bundledPluginWorkspace(),
-    [`${BUNDLED_PLUGIN_ROOT_DIR}/memory-core`]: bundledPluginWorkspace(),
+    [`${BUNDLED_PLUGIN_ROOT_DIR}/memory-core`]: bundledPluginWorkspace([
+      // The subprocess boundary tests spawn this fixture by computed URL.
+      "src/memory/fixtures/manager-search-knn-child.fixture.mjs!",
+    ]),
     [`${BUNDLED_PLUGIN_ROOT_DIR}/memory-lancedb`]: {
       ...bundledPluginWorkspace(),
       // LanceDB declares Arrow as a peer; the plugin provides it for runtime table values.

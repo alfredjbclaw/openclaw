@@ -12,6 +12,7 @@ import ai.openclaw.app.chat.ChatMessage
 import ai.openclaw.app.chat.ChatOutboxItem
 import ai.openclaw.app.chat.ChatPendingToolCall
 import ai.openclaw.app.chat.ChatProgressCard
+import ai.openclaw.app.chat.ChatQuestionDraft
 import ai.openclaw.app.chat.ChatQuestionPrompt
 import ai.openclaw.app.chat.ChatSessionDeletion
 import ai.openclaw.app.chat.ChatSessionEntry
@@ -29,10 +30,10 @@ import ai.openclaw.app.chat.MessageSpeechClient
 import ai.openclaw.app.chat.MessageSpeechController
 import ai.openclaw.app.chat.MessageSpeechState
 import ai.openclaw.app.chat.OutgoingAttachment
+import ai.openclaw.app.chat.SESSION_UNREAD_ACK_CAPABILITY
 import ai.openclaw.app.chat.SessionBranch
 import ai.openclaw.app.chat.SessionForkResult
 import ai.openclaw.app.chat.SessionRewindResult
-import ai.openclaw.app.chat.SystemSpeechSpeaker
 import ai.openclaw.app.gateway.DeviceAuthEntry
 import ai.openclaw.app.gateway.DeviceAuthStore
 import ai.openclaw.app.gateway.DeviceIdentityStore
@@ -92,6 +93,7 @@ import ai.openclaw.app.node.asStringOrNull
 import ai.openclaw.app.node.invokeErrorFromThrowable
 import ai.openclaw.app.node.readAndroidPermissionSnapshot
 import ai.openclaw.app.node.resolveGatewayAccentArgb
+import ai.openclaw.app.node.resolveProfileAccentArgb
 import ai.openclaw.app.systemagent.SystemAgentChatController
 import ai.openclaw.app.systemagent.SystemAgentChatState
 import ai.openclaw.app.systemagent.SystemAgentGatewayAccess
@@ -99,6 +101,7 @@ import ai.openclaw.app.voice.AndroidOnDeviceVoiceWakeRecognizer
 import ai.openclaw.app.voice.GatewayTranscriptionSession
 import ai.openclaw.app.voice.MicCaptureManager
 import ai.openclaw.app.voice.PreviewVoiceWakeRecognizer
+import ai.openclaw.app.voice.SystemSpeechSpeaker
 import ai.openclaw.app.voice.TalkAudioPlayer
 import ai.openclaw.app.voice.TalkModeManager
 import ai.openclaw.app.voice.TalkPttOnceStart
@@ -762,6 +765,7 @@ class NodeRuntime private constructor(
   private val chatCommandOutbox = chatStores.commandOutbox
   private val clientDatabases = chatStores.clientDatabases
   private val externalTranscriptCache = chatStores.externalTranscriptCache
+  private val screenshotRequester by lazy { AndroidScreenshotFixture.createRequester() }
   private val gatewayAuthLifecycleLock = Any()
   private var gatewayAuthResetInProgress = false
   private var gatewayConnectOperationsInFlight = 0
@@ -1330,6 +1334,7 @@ class NodeRuntime private constructor(
   private val gatewayMethodsLock = Any()
   private var gatewayApprovalRpcFamily = GatewayApprovalRpcFamily.Unavailable
   private var gatewayAdvertisedMethods: Set<String>? = null
+  private var gatewayAdvertisedCapabilities: Set<String>? = null
   private var gatewayMethodsEpoch = 0L
 
   @Volatile internal var gatewayDataRequestOverrideForTests: GatewayDataRequestOverride? = null
@@ -1408,6 +1413,7 @@ class NodeRuntime private constructor(
         _gatewayVersion.value = hello.serverVersion
         _gatewayUpdateAvailable.value = hello.updateAvailable
         replaceGatewayMethods(hello.methods)
+        replaceGatewayCapabilities(hello.capabilities)
         val operatorScopes = normalizeOperatorScopes(hello.authScopes)
         _operatorScopes.value = operatorScopes
         // Pairing capabilities require positive hello advertisement; an unknown catalog grants none.
@@ -1507,7 +1513,7 @@ class NodeRuntime private constructor(
           NodeRuntimeMode.Live -> operatorSession.captureRequestLease(gatewayId)
           NodeRuntimeMode.ScreenshotFixture ->
             GatewaySession.RequestLease(endpointStableId = AndroidScreenshotFixture.gatewayId) { method, paramsJson, _ ->
-              AndroidScreenshotFixture.request(method, paramsJson)
+              screenshotRequester(method, paramsJson)
             }
         }
       },
@@ -1681,6 +1687,7 @@ class NodeRuntime private constructor(
     _gatewayVersion.value = null
     _gatewayUpdateAvailable.value = null
     replaceGatewayMethods(null)
+    replaceGatewayCapabilities(null)
     _operatorScopes.value = emptyList()
     _devicePairingCapabilities.value = GatewayDevicePairingCapabilities()
     _gatewayAccentArgb.value = null
@@ -1929,6 +1936,7 @@ class NodeRuntime private constructor(
           currentDefaultAgentId = { gatewayDefaultAgentId.value },
           currentDefaultAgentRevision = gatewayDefaultAgentRevision::get,
           gatewayAdvertisesMethod = ::gatewayAdvertisesMethod,
+          gatewayAdvertisesCapability = ::gatewayAdvertisesCapability,
           commandOutbox = chatCommandOutbox,
           recordModelRecent = prefs::recordModelRecent,
           onSessionDeleted = ::publishChatSessionDeletion,
@@ -1943,8 +1951,9 @@ class NodeRuntime private constructor(
         ChatController(
           scope = scope,
           json = json,
-          requestGateway = AndroidScreenshotFixture::request,
+          requestGateway = screenshotRequester,
           gatewayAdvertisesMethod = { _ -> true },
+          gatewayAdvertisesCapability = { _ -> true },
         )
     }.also {
       it.applyMainSessionKey(_mainSessionKey.value)
@@ -1960,7 +1969,7 @@ class NodeRuntime private constructor(
       ).also { controller ->
         scope.launch {
           controller.state.collect { state ->
-            voiceWakeManager.setSuppressed(VoiceWakeSuppressionReason.MessageSpeech, state != null)
+            voiceWakeManager.setSuppressed(VoiceWakeSuppressionReason.MessageSpeech, state?.isActive == true)
           }
         }
       }
@@ -2893,12 +2902,17 @@ class NodeRuntime private constructor(
 
   fun deleteChatOutboxCommand(id: String) = chat.deleteOutboxCommand(id)
 
-  fun resolveChatQuestion(
-    id: String,
-    answers: Map<String, List<String>>,
-  ) = chat.resolveQuestion(id, answers)
+  fun updateChatQuestionDraft(
+    prompt: ChatQuestionPrompt,
+    update: (ChatQuestionDraft) -> ChatQuestionDraft,
+  ) = chat.updateQuestionDraft(prompt, update)
 
-  fun skipChatQuestion(id: String) = chat.skipQuestion(id)
+  fun resolveChatQuestion(
+    prompt: ChatQuestionPrompt,
+    answers: Map<String, List<String>>,
+  ) = chat.resolveQuestion(prompt, answers)
+
+  fun skipChatQuestion(prompt: ChatQuestionPrompt) = chat.skipQuestion(prompt)
 
   private fun applyScreenshotFixture() {
     check(BuildConfig.DEBUG) { "Android screenshot fixtures require a debug build" }
@@ -2906,6 +2920,7 @@ class NodeRuntime private constructor(
     _remoteAddress.value = "Mac Studio on local network"
     _gatewayVersion.value = BuildConfig.VERSION_NAME
     replaceGatewayMethods(setOf(GatewayMethod.DesktopObserve.rawValue))
+    replaceGatewayCapabilities(setOf(SESSION_UNREAD_ACK_CAPABILITY))
     _gatewayControlPage.value =
       GatewayControlPage(
         baseUrl = AndroidScreenshotFixture.controlUiBaseUrl,
@@ -2953,7 +2968,7 @@ class NodeRuntime private constructor(
     // Screenshot mode parses gateway-shaped fixtures so UI navigation covers the live data contract.
     val list =
       json
-        .parseToJsonElement(AndroidScreenshotFixture.request("cron.list", null))
+        .parseToJsonElement(screenshotRequester("cron.list", null))
         .asObjectOrNull()
     return parseCronJobs(list?.get("jobs") as? JsonArray)
   }
@@ -2964,7 +2979,7 @@ class NodeRuntime private constructor(
   ) {
     val detail =
       json
-        .parseToJsonElement(AndroidScreenshotFixture.request("cron.get", cronJobGetParams(detailRequest.id)))
+        .parseToJsonElement(screenshotRequester("cron.get", cronJobGetParams(detailRequest.id)))
         .asObjectOrNull()
         ?.let(::parseGatewayCronJobDetail)
         ?.takeIf { it.id == detailRequest.id }
@@ -2979,7 +2994,7 @@ class NodeRuntime private constructor(
   private fun publishScreenshotCronHistory(request: CronJobDetailRequest) {
     val history =
       json
-        .parseToJsonElement(AndroidScreenshotFixture.request("cron.runs", cronJobGetParams(request.id)))
+        .parseToJsonElement(screenshotRequester("cron.runs", cronJobGetParams(request.id)))
         .asObjectOrNull()
     val runs = parseGatewayCronRunHistory(history?.get("entries") as? JsonArray)
     cronRunHistoryRequestGuard.publishIfCurrent(request) {
@@ -5167,6 +5182,11 @@ class NodeRuntime private constructor(
     if (event == GatewayEvent.VoicewakeChanged.rawValue) {
       applyVoiceWakeWords(payloadJson)
     }
+    if (event == GatewayEvent.UsersPrefsChanged.rawValue) {
+      // The gateway targets this event at connections bound to the caller's own
+      // profile; receipt means our profile appearance changed on another device.
+      scope.launch { refreshBrandingFromGateway() }
+    }
     handleExecApprovalGatewayEvent(event = event, payloadJson = payloadJson)
     micCapture.handleGatewayEvent(event, payloadJson)
     talkMode.handleGatewayEvent(event, payloadJson)
@@ -5541,7 +5561,7 @@ class NodeRuntime private constructor(
       val res = requestGatewayData(gatewayScope, "config.get", "{}")
       val root = json.parseToJsonElement(res).asObjectOrNull()
       val config = root?.get("config").asObjectOrNull()
-      val parsed = resolveGatewayAccentArgb(config)
+      val parsed = fetchProfileAccentArgb(gatewayScope) ?: resolveGatewayAccentArgb(config)
       publishGatewayData(gatewayScope) {
         _gatewayAccentArgb.value = parsed
       }
@@ -5549,6 +5569,28 @@ class NodeRuntime private constructor(
       // ignore
     }
   }
+
+  /**
+   * Caller's per-profile accent (users.prefs.get). Null covers profile-less
+   * connections (no_durable_identity), older gateways without the method, and
+   * malformed stored values, so the gateway accent stays the fallback. Inner
+   * try: a failed profile fetch must not discard the config accent.
+   */
+  private suspend fun fetchProfileAccentArgb(gatewayScope: GatewayDataScope): Long? =
+    try {
+      val res =
+        requestGatewayData(gatewayScope, GatewayMethod.UsersPrefsGet.rawValue, """{"keys":["ui.accent"]}""")
+      val root = json.parseToJsonElement(res).asObjectOrNull()
+      if ((root?.get("status") as? JsonPrimitive)?.contentOrNull == "ok") {
+        resolveProfileAccentArgb(root.get("entries").asObjectOrNull())
+      } else {
+        null
+      }
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (_: Throwable) {
+      null
+    }
 
   /** Lists one directory of the active agent's workspace (read-only RPC). */
   suspend fun listWorkspaceFiles(
@@ -7483,6 +7525,14 @@ class NodeRuntime private constructor(
   }
 
   private fun gatewayAdvertisesMethod(method: String): Boolean? = synchronized(gatewayMethodsLock) { gatewayAdvertisedMethods?.let { method in it } }
+
+  private fun replaceGatewayCapabilities(capabilities: Set<String>?) {
+    synchronized(gatewayMethodsLock) {
+      gatewayAdvertisedCapabilities = capabilities
+    }
+  }
+
+  private fun gatewayAdvertisesCapability(capability: String): Boolean? = synchronized(gatewayMethodsLock) { gatewayAdvertisedCapabilities?.let { capability in it } }
 
   private fun captureGatewayMethods(): GatewayMethodsSnapshot =
     synchronized(gatewayMethodsLock) {

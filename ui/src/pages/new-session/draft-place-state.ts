@@ -68,7 +68,7 @@ export class DraftPlaceState {
       () => ({
         remotePlacement: this.remotePlacement,
         selectedProject: this.browser.selectedProject(),
-        remoteProjectSelected: Boolean(this.browser.remoteProject),
+        remoteProject: this.browser.remoteProject,
         folder: this.folderValue,
         workspace: this.workspacePath(),
         workspaceGit: this.selectedAgent()?.workspaceGit === true,
@@ -137,8 +137,8 @@ export class DraftPlaceState {
     return this.agentsHydratedValue;
   }
 
-  get worktreePreferenceReady(): boolean {
-    return this.repositoryState.preferenceReady;
+  get placementPreferenceReady(): boolean {
+    return this.repositoryState.preferenceReady && this.preferredWhereRestore === null;
   }
 
   canAdoptGroupDefaults(): boolean {
@@ -178,7 +178,11 @@ export class DraftPlaceState {
   }
 
   devices() {
-    return projectDevicePlacements(this.gateway.environments, this.devicePlacementRequirement());
+    return projectDevicePlacements(
+      this.gateway.environments,
+      this.devicePlacementRequirement(),
+      this.gateway.deviceCatalogDisabledReason,
+    );
   }
 
   private findDevice(deviceId: string) {

@@ -15,7 +15,6 @@ import {
   GATEWAY_SERVICE_RUNTIME_PID_ENV,
   GATEWAY_SERVICE_SELECTOR_ENV_KEYS,
 } from "../daemon/constants.js";
-import type { ClawHubRiskAcknowledgementRequest } from "../infra/clawhub-install-trust.js";
 import { isBetaTag } from "../infra/update-channels.js";
 import { applyDevUpdateTargetEnv } from "../infra/update-dev-target.js";
 import {
@@ -37,10 +36,6 @@ const text = vi.fn();
 const spinner = vi.fn(() => ({ start: vi.fn(), stop: vi.fn() }));
 const isCancel = (value: unknown) => value === "cancel";
 
-type ClawHubRiskHandler = (
-  request: ClawHubRiskAcknowledgementRequest,
-) => boolean | Promise<boolean>;
-
 const readPackageName = vi.fn();
 const readPackageVersion = vi.fn();
 const resolveGlobalManager = vi.fn();
@@ -48,6 +43,9 @@ const serviceLoaded = vi.fn();
 const serviceEnabled = vi.fn();
 const serviceStop = vi.fn();
 const serviceRestart = vi.fn();
+// A fixed Gateway PID can collide with the updater and trigger its self-stop safeguard.
+const gatewayFixturePid = process.pid + 1;
+const unrelatedGatewayFixturePid = process.pid + 2;
 const isDefaultInstallIdentity = vi.hoisted(() =>
   vi.fn<(env?: NodeJS.ProcessEnv, homedir?: () => string, platform?: NodeJS.Platform) => boolean>(
     () => true,
@@ -576,34 +574,16 @@ describe("update-cli", () => {
   };
 
   const clawHubRiskWarning =
-    "╭─ WARNING - ClawHub found security risks in this release ─╮\n" +
-    "│ • Security scan:     suspicious                                      │\n" +
+    "╭─ ClawHub Security Audit ─────────────────────────────────╮\n" +
+    "│ Outcome: Review                                         │\n" +
     "╰───────────────────────────────────────────────────────────────────────╯";
   const clawHubSuspiciousPayloadWarning =
-    "╭─ WARNING - ClawHub found security risks in this release ─╮\n" +
-    "│ • Security scan:     suspicious                                      │\n" +
-    "│ • Finding:           suspicious payload strings                       │\n" +
+    "╭─ ClawHub Security Audit ─────────────────────────────────╮\n" +
+    "│ Outcome: Review                                         │\n" +
+    "│ Overview: Review the requested capabilities.             │\n" +
     "╰───────────────────────────────────────────────────────────────────────╯";
   const clawHubSyncRiskError =
-    "Failed to update demo: Update cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning. (ClawHub clawhub:demo@1.2.4).";
-
-  const createClawHubRiskRequest = (
-    overrides: Partial<ClawHubRiskAcknowledgementRequest> = {},
-  ): ClawHubRiskAcknowledgementRequest => ({
-    packageName: "demo",
-    version: "1.2.3",
-    trust: {
-      scanStatus: "suspicious",
-      moderationState: null,
-      blockedFromDownload: false,
-      reasons: ["payload_strings"],
-      pending: false,
-      stale: false,
-    },
-    acknowledgementKind: "confirm",
-    warning: clawHubRiskWarning,
-    ...overrides,
-  });
+    "Failed to update demo: ClawHub blocked this release; update was not started. (ClawHub clawhub:demo@1.2.4).";
 
   const setTty = (value: boolean | undefined) => {
     Object.defineProperty(process.stdin, "isTTY", {
@@ -765,23 +745,6 @@ describe("update-cli", () => {
   };
   const lastNpmPluginUpdateCall = () =>
     npmPluginUpdateCall(updateNpmInstalledPlugins.mock.calls.length - 1);
-
-  const hasClawHubRiskHandler = (
-    call: Record<string, unknown> | undefined,
-  ): call is Record<string, unknown> & { onClawHubRisk: ClawHubRiskHandler } =>
-    typeof call?.onClawHubRisk === "function";
-
-  const getConfirmMessage = (): string => {
-    const options = confirm.mock.calls[0]?.[0];
-    if (!options || typeof options !== "object" || !("message" in options)) {
-      throw new Error("expected confirm message");
-    }
-    const message = options.message;
-    if (typeof message !== "string") {
-      throw new Error("expected confirm message to be a string");
-    }
-    return message;
-  };
 
   const replaceConfigCall = (index = 0) => vi.mocked(replaceConfigFile).mock.calls[index]?.[0];
   const lastReplaceConfigCall = () =>
@@ -1350,7 +1313,11 @@ describe("update-cli", () => {
       },
     });
     serviceLoaded.mockResolvedValue(true);
-    serviceReadRuntime.mockResolvedValue({ status: "running", pid: 4242, state: "running" });
+    serviceReadRuntime.mockResolvedValue({
+      status: "running",
+      pid: gatewayFixturePid,
+      state: "running",
+    });
   };
 
   const mockStoppedManagedGitGateway = () => {
@@ -1363,7 +1330,11 @@ describe("update-cli", () => {
     serviceLoaded.mockResolvedValue(false);
     serviceLoaded.mockResolvedValueOnce(true);
     serviceReadRuntime.mockResolvedValue({ status: "stopped", pid: null, state: "stopped" });
-    serviceReadRuntime.mockResolvedValueOnce({ status: "running", pid: 4242, state: "running" });
+    serviceReadRuntime.mockResolvedValueOnce({
+      status: "running",
+      pid: gatewayFixturePid,
+      state: "running",
+    });
   };
 
   const expectFailedManagedGitRestart = (message: string) => {
@@ -1497,18 +1468,6 @@ describe("update-cli", () => {
     return readRestartSentinel({ OPENCLAW_STATE_DIR: stateDir } as NodeJS.ProcessEnv);
   };
 
-  const setupInteractiveClawHubRisk = async () => {
-    mockPackageInstallAtCaseDir();
-    setTty(true);
-    setStdoutTty(true);
-    await updateCommand({ channel: "beta", restart: false });
-    const syncCall = syncPluginCall();
-    if (!hasClawHubRiskHandler(syncCall)) {
-      throw new Error("expected ClawHub risk prompt handler");
-    }
-    return syncCall;
-  };
-
   beforeEach(() => {
     delete process.env.OPENCLAW_SERVICE_MARKER;
     delete process.env.OPENCLAW_SERVICE_KIND;
@@ -1517,7 +1476,7 @@ describe("update-cli", () => {
       delete process.env[key];
     }
     restartHealthTestControl.snapshot = undefined;
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     serviceEnabled.mockResolvedValue(true);
     readPersistedInstalledPluginIndex.mockResolvedValue(null);
     restorePersistedInstalledPluginIndex.mockResolvedValue(undefined);
@@ -1618,7 +1577,7 @@ describe("update-cli", () => {
     );
     serviceReadRuntime.mockResolvedValue({
       status: "running",
-      pid: 4242,
+      pid: gatewayFixturePid,
       state: "running",
     });
     mockGetSelfAndAncestorPidsSync.mockReturnValue(new Set<number>([process.pid]));
@@ -1627,7 +1586,7 @@ describe("update-cli", () => {
     inspectPortUsage.mockResolvedValue({
       port: 18789,
       status: "busy",
-      listeners: [{ pid: 4242, command: "openclaw-gateway" }],
+      listeners: [{ pid: gatewayFixturePid, command: "openclaw-gateway" }],
       hints: [],
     });
     classifyPortListener.mockReturnValue("gateway");
@@ -1865,10 +1824,14 @@ describe("update-cli", () => {
       OPENCLAW_GATEWAY_PORT: "19222",
       OPENCLAW_SERVICE_MARKER: "openclaw",
       OPENCLAW_SERVICE_KIND: "gateway",
-      [GATEWAY_SERVICE_RUNTIME_PID_ENV]: "7777",
+      [GATEWAY_SERVICE_RUNTIME_PID_ENV]: String(unrelatedGatewayFixturePid),
     });
     serviceLoaded.mockResolvedValue(true);
-    serviceReadRuntime.mockResolvedValue({ status: "running", pid: 4242, state: "running" });
+    serviceReadRuntime.mockResolvedValue({
+      status: "running",
+      pid: gatewayFixturePid,
+      state: "running",
+    });
     vi.mocked(readConfigFileSnapshot).mockImplementation(async () =>
       process.env.OPENCLAW_PROFILE === "work" ? managedSnapshot : baseSnapshot,
     );
@@ -1984,7 +1947,11 @@ describe("update-cli", () => {
       OPENCLAW_GATEWAY_PORT: "19222",
     });
     serviceLoaded.mockResolvedValue(true);
-    serviceReadRuntime.mockResolvedValue({ status: "running", pid: 4242, state: "running" });
+    serviceReadRuntime.mockResolvedValue({
+      status: "running",
+      pid: gatewayFixturePid,
+      state: "running",
+    });
     vi.mocked(resolveGatewayInstallEntrypoint).mockResolvedValueOnce(undefined);
     vi.mocked(resolveGatewayInstallEntrypoint).mockResolvedValueOnce(
       "/tmp/openclaw-updated-entry.mjs",
@@ -2039,7 +2006,11 @@ describe("update-cli", () => {
       OPENCLAW_GATEWAY_PORT: "19222",
     });
     serviceLoaded.mockResolvedValue(true);
-    serviceReadRuntime.mockResolvedValue({ status: "running", pid: 4242, state: "running" });
+    serviceReadRuntime.mockResolvedValue({
+      status: "running",
+      pid: gatewayFixturePid,
+      state: "running",
+    });
     prepareRestartScript.mockResolvedValue(null);
     vi.mocked(runDaemonRestart).mockResolvedValue(true);
     let doctorProfile: string | undefined;
@@ -2202,7 +2173,10 @@ describe("update-cli", () => {
   it("does not carry gateway service markers into the post-core update process", async () => {
     setupUpdatedRootRefresh();
 
-    await runWithGatewayServiceEnv({ yes: true }, { [GATEWAY_SERVICE_RUNTIME_PID_ENV]: "7777" });
+    await runWithGatewayServiceEnv(
+      { yes: true },
+      { [GATEWAY_SERVICE_RUNTIME_PID_ENV]: String(unrelatedGatewayFixturePid) },
+    );
 
     const spawnEnv = spawnCall()?.[2]?.env;
     expect(spawnEnv?.OPENCLAW_SERVICE_MARKER).toBeUndefined();
@@ -2467,33 +2441,6 @@ describe("update-cli", () => {
     expect(call?.[2]?.env?.OPENCLAW_UPDATE_POST_CORE_CHANNEL).toBe("dev");
     expect(call?.[2]?.env?.OPENCLAW_UPDATE_POST_CORE_REQUESTED_CHANNEL).toBe("dev");
     expectNoSideEffects(replaceConfigFile, syncPluginsForUpdateChannel, updateNpmInstalledPlugins);
-  });
-
-  it("carries ClawHub risk acknowledgement into post-core resume", async () => {
-    const { entrypoints } = setupUpdatedRootRefresh({
-      gatewayUpdateImpl: async (root) =>
-        makeOkUpdateResult({
-          mode: "git",
-          root,
-          before: { sha: "old-sha", version: "2026.4.26" },
-          after: { sha: "new-sha", version: "2026.4.27" },
-        }),
-    });
-
-    await updateCommand({
-      channel: "dev",
-      yes: true,
-      restart: false,
-      acknowledgeClawHubRisk: true,
-    });
-
-    expect(spawnCall()?.[1]).toEqual([
-      entrypoints[0],
-      "update",
-      "--no-restart",
-      "--yes",
-      "--acknowledge-clawhub-risk",
-    ]);
   });
 
   it("keeps downgrade post-update work in the current process", async () => {
@@ -3133,9 +3080,9 @@ describe("update-cli", () => {
 
   it("includes non-blocking ClawHub trust warnings in json post-core plugin output", async () => {
     const trustWarning =
-      "╭─ REVIEW RECOMMENDED - ClawHub has not completed a fresh clean check ─╮\n" +
-      "│ • Security scan:     pending                                           │\n" +
-      "│ • Status:            security scan is pending                          │\n" +
+      "╭─ ClawHub Security Audit ─────────────────────────────────────────────╮\n" +
+      "│ Outcome: Review                                                     │\n" +
+      "│ Overview: The security scan is pending.                             │\n" +
       "╰────────────────────────────────────────────────────────────────────────╯";
     updateNpmInstalledPlugins.mockImplementationOnce(
       async (params: {
@@ -3198,7 +3145,7 @@ describe("update-cli", () => {
     );
     vi.mocked(defaultRuntime.writeJson).mockClear();
 
-    await updateCommand({ json: true, restart: false, acknowledgeClawHubRisk: true });
+    await updateCommand({ json: true, restart: false });
 
     const jsonOutput = lastWriteJsonCall() as UpdateRunResult | undefined;
     expect(jsonOutput?.postUpdate?.plugins?.status).toBe("warning");
@@ -3255,10 +3202,10 @@ describe("update-cli", () => {
             {
               pluginId: "demo",
               status: "skipped",
-              code: CLAWHUB_INSTALL_ERROR_CODE.CLAWHUB_RISK_ACKNOWLEDGEMENT_REQUIRED,
+              code: CLAWHUB_INSTALL_ERROR_CODE.CLAWHUB_DOWNLOAD_BLOCKED,
               warning: trustWarning,
               message:
-                "Skipped demo ClawHub update: Update cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning. Existing installed plugin left unchanged.",
+                "Skipped demo ClawHub update: ClawHub blocked this release; update was not started. Existing installed plugin left unchanged.",
             },
           ],
         };
@@ -3286,7 +3233,7 @@ describe("update-cli", () => {
       },
     } as OpenClawConfig;
     vi.mocked(readConfigFileSnapshot).mockResolvedValue(configSnapshot(config));
-    loadInstalledPluginIndexInstallRecords.mockResolvedValueOnce({
+    loadInstalledPluginIndexInstallRecords.mockResolvedValue({
       demo: {
         source: "npm",
         spec: "@openclaw/demo@1.0.0",
@@ -3360,36 +3307,6 @@ describe("update-cli", () => {
     expect(pluginOutcome(jsonOutput)?.status).toBe("skipped");
   });
 
-  it("marks unacknowledged ClawHub risk skips as post-update warnings", async () => {
-    const trustWarning = clawHubSuspiciousPayloadWarning;
-    mockNpmPluginOutcomes([
-      {
-        pluginId: "demo",
-        status: "skipped",
-        code: CLAWHUB_INSTALL_ERROR_CODE.CLAWHUB_RISK_ACKNOWLEDGEMENT_REQUIRED,
-        warning: trustWarning,
-        message:
-          "Skipped demo ClawHub update: Update cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning. Existing installed plugin left unchanged.",
-      },
-    ]);
-    vi.mocked(defaultRuntime.writeJson).mockClear();
-
-    await updateCommand({ json: true, restart: false });
-
-    const jsonOutput = lastWriteJsonCall() as UpdateRunResult | undefined;
-    expect(jsonOutput?.postUpdate?.plugins?.status).toBe("warning");
-    expect(pluginWarning(jsonOutput)?.pluginId).toBe("demo");
-    expect(pluginWarning(jsonOutput)?.reason).toContain("Security scan:     suspicious");
-    expect(pluginWarning(jsonOutput)?.reason).toContain("suspicious payload strings");
-    expect(pluginWarning(jsonOutput)?.reason).toContain("--acknowledge-clawhub-risk");
-    expect(pluginWarning(jsonOutput)?.guidance).toEqual([
-      "Run openclaw update repair to retry post-update plugin repair.",
-      "Run openclaw plugins inspect demo --runtime --json for details.",
-    ]);
-    expect(pluginOutcome(jsonOutput)?.pluginId).toBe("demo");
-    expect(pluginOutcome(jsonOutput)?.status).toBe("skipped");
-  });
-
   it("marks blocked ClawHub update skips as post-update warnings", async () => {
     const trustWarning =
       "╭─ BLOCKED - ClawHub flagged this release as malicious ─╮\n" +
@@ -3417,25 +3334,6 @@ describe("update-cli", () => {
     expect(pluginOutcome(jsonOutput)?.pluginId).toBe("demo");
     expect(pluginOutcome(jsonOutput)?.status).toBe("skipped");
     expect(pluginOutcome(jsonOutput)?.message).toContain("Run openclaw update repair");
-  });
-
-  it("prints unacknowledged ClawHub risk skips in human post-update output", async () => {
-    mockNpmPluginOutcomes([
-      {
-        pluginId: "demo",
-        status: "skipped",
-        code: CLAWHUB_INSTALL_ERROR_CODE.CLAWHUB_RISK_ACKNOWLEDGEMENT_REQUIRED,
-        message:
-          "Skipped demo ClawHub update: Update cancelled; rerun with --acknowledge-clawhub-risk to continue after reviewing the warning. Existing installed plugin left unchanged.",
-      },
-    ]);
-
-    await updateCommand({ yes: true, restart: false });
-
-    const logs = getLogOutput();
-    expect(logs).toContain("--acknowledge-clawhub-risk");
-    expect(logs).toContain("Run openclaw update repair to retry post-update plugin repair.");
-    expect(logs).toContain("Run openclaw plugins inspect demo --runtime --json for details.");
   });
 
   it("fails unexpected post-core plugin sync exceptions", async () => {
@@ -3903,28 +3801,6 @@ describe("update-cli", () => {
     expect(seenJson).toBe(true);
   });
 
-  it("parses update --acknowledge-clawhub-risk as the update command option", async () => {
-    mockPackageInstallAtCaseDir();
-    const program = new Command();
-    program.name("openclaw");
-    program.exitOverride();
-    registerUpdateCli(program);
-
-    await program.parseAsync([
-      "node",
-      "openclaw",
-      "update",
-      "--channel",
-      "beta",
-      "--yes",
-      "--no-restart",
-      "--acknowledge-clawhub-risk",
-    ]);
-
-    expect(syncPluginCall()?.acknowledgeClawHubRisk).toBe(true);
-    expect(npmPluginUpdateCall()?.acknowledgeClawHubRisk).toBe(true);
-  });
-
   it.each([
     {
       name: "defaults to dev channel for git installs when unset",
@@ -4324,7 +4200,7 @@ describe("update-cli", () => {
     serviceReadCommand.mockResolvedValue(null);
     serviceReadRuntime.mockResolvedValueOnce({
       status: "running",
-      pid: 4242,
+      pid: gatewayFixturePid,
       state: "running",
     });
 
@@ -4345,7 +4221,9 @@ describe("update-cli", () => {
   it("refuses package updates from inside the active gateway process tree", async () => {
     mockPackageInstallStatus(createCaseDir("openclaw-update"));
     serviceLoaded.mockResolvedValue(true);
-    mockGetSelfAndAncestorPidsSync.mockReturnValue(new Set<number>([process.pid, 4242]));
+    mockGetSelfAndAncestorPidsSync.mockReturnValue(
+      new Set<number>([process.pid, gatewayFixturePid]),
+    );
 
     await updateCommand({ yes: true });
 
@@ -4353,7 +4231,7 @@ describe("update-cli", () => {
     expect(errors).toContain(
       "openclaw update detected it is running inside the gateway process tree.",
     );
-    expect(errors).toContain("Gateway PID 4242 is an ancestor");
+    expect(errors).toContain(`Gateway PID ${gatewayFixturePid} is an ancestor`);
     expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
     expect(serviceStop).not.toHaveBeenCalled();
     expect(packageInstallCommandCall()).toBeUndefined();
@@ -4364,18 +4242,21 @@ describe("update-cli", () => {
     serviceLoaded.mockResolvedValue(true);
     serviceReadRuntime.mockResolvedValue({
       status: "running",
-      pid: 4242,
+      pid: gatewayFixturePid,
       state: "running",
     });
     mockGetSelfAndAncestorPidsSync.mockReturnValue(new Set<number>([process.pid]));
 
-    await runWithGatewayServiceEnv({ yes: true }, { [GATEWAY_SERVICE_RUNTIME_PID_ENV]: "4242" });
+    await runWithGatewayServiceEnv(
+      { yes: true },
+      { [GATEWAY_SERVICE_RUNTIME_PID_ENV]: String(gatewayFixturePid) },
+    );
 
     const errors = getErrorOutput();
     expect(errors).toContain(
       "openclaw update detected it is running inside the gateway process tree.",
     );
-    expect(errors).toContain("Gateway PID 4242 is an ancestor");
+    expect(errors).toContain(`Gateway PID ${gatewayFixturePid} is an ancestor`);
     expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
     expect(serviceStop).not.toHaveBeenCalled();
     expect(packageInstallCommandCall()).toBeUndefined();
@@ -5177,7 +5058,7 @@ describe("update-cli", () => {
       });
       serviceReadRuntime.mockResolvedValue(
         runtimeStatus === "running"
-          ? { status: "running", state: "running", pid: 4242 }
+          ? { status: "running", state: "running", pid: gatewayFixturePid }
           : { status: "stopped", state: "stopped" },
       );
       suspendScheduledTaskAutoStartForUpdate.mockResolvedValue(true);
@@ -5264,7 +5145,7 @@ describe("update-cli", () => {
       portUsage: {
         port: 18789,
         status: "busy",
-        listeners: [{ pid: 4242, command: "openclaw-gateway" }],
+        listeners: [{ pid: gatewayFixturePid, command: "openclaw-gateway" }],
         hints: [],
       },
       healthy: true,
@@ -6543,7 +6424,7 @@ describe("update-cli", () => {
     const sourceConfig = {
       plugins: {},
     } as OpenClawConfig;
-    loadInstalledPluginIndexInstallRecords.mockResolvedValueOnce(pluginInstallRecords);
+    loadInstalledPluginIndexInstallRecords.mockResolvedValue(pluginInstallRecords);
     vi.mocked(readConfigFileSnapshot).mockResolvedValue({
       ...baseSnapshot,
       sourceConfig,
@@ -6577,107 +6458,6 @@ describe("update-cli", () => {
     expect(syncConfig?.plugins?.entries).toBeUndefined();
     expect(updateCall?.skipDisabledPlugins).toBe(true);
     expect(updateCall?.syncOfficialPluginInstalls).toBe(true);
-  });
-
-  it("forwards ClawHub risk acknowledgement to post-update plugin work", async () => {
-    mockPackageInstallAtCaseDir();
-
-    await updateCommand({
-      channel: "beta",
-      yes: true,
-      restart: false,
-      acknowledgeClawHubRisk: true,
-    });
-
-    expect(syncPluginCall()?.acknowledgeClawHubRisk).toBe(true);
-    expect(npmPluginUpdateCall()?.acknowledgeClawHubRisk).toBe(true);
-    expect(lastNpmPluginUpdateCall()?.acknowledgeClawHubRisk).toBe(true);
-    expect(runPostCorePluginConvergenceSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ acknowledgeClawHubRisk: true }),
-    );
-  });
-
-  it.each([
-    {
-      name: "stdout is not interactive",
-      stdoutTty: false,
-      options: { channel: "beta", restart: false },
-    },
-    {
-      name: "--yes is set",
-      stdoutTty: true,
-      options: { channel: "beta", yes: true, restart: false },
-    },
-    {
-      name: "the update is a dry run",
-      stdoutTty: true,
-      options: { channel: "beta", dryRun: true, restart: false },
-    },
-  ])("does not prompt for ClawHub risk when $name", async ({ stdoutTty, options }) => {
-    mockPackageInstallAtCaseDir();
-    setTty(true);
-    setStdoutTty(stdoutTty);
-
-    await updateCommand(options);
-
-    expect(syncPluginCall()?.onClawHubRisk).toBeUndefined();
-    expect(npmPluginUpdateCall()?.onClawHubRisk).toBeUndefined();
-    expect(lastNpmPluginUpdateCall()?.onClawHubRisk).toBeUndefined();
-  });
-
-  it("sanitizes ClawHub risk prompt labels during post-update plugin work", async () => {
-    const syncCall = await setupInteractiveClawHubRisk();
-
-    confirm.mockClear();
-    confirm.mockResolvedValueOnce(true);
-    await syncCall.onClawHubRisk(
-      createClawHubRiskRequest({
-        packageName: "demo\npkg",
-        version: "1.2.3\u001b[2K",
-        warning: "warning",
-      }),
-    );
-
-    const message = getConfirmMessage();
-    expect(message).toContain("Update ClawHub package");
-    expect(message).toContain('"demo\\npkg@1.2.3"');
-    expect(message).not.toContain("\n");
-    expect(message).not.toContain("\u001b");
-  });
-
-  it("prints ClawHub risk warnings before interactive post-update acknowledgement prompts", async () => {
-    const warning = clawHubRiskWarning;
-    const syncCall = await setupInteractiveClawHubRisk();
-
-    confirm.mockImplementationOnce(async () => {
-      const logs = vi.mocked(defaultRuntime.log).mock.calls.map((call) => String(call[0]));
-      expect(logs.some((line) => line.includes(warning))).toBe(true);
-      return true;
-    });
-    await syncCall.onClawHubRisk(createClawHubRiskRequest({ warning }));
-  });
-
-  it("does not duplicate ClawHub risk warnings already printed before prompts", async () => {
-    const warning = clawHubRiskWarning;
-    const syncCall = await setupInteractiveClawHubRisk();
-    const logger = syncCall.logger;
-    if (
-      logger === undefined ||
-      logger === null ||
-      typeof logger !== "object" ||
-      !("warn" in logger) ||
-      typeof logger.warn !== "function"
-    ) {
-      throw new Error("expected plugin logger");
-    }
-
-    logger.warn(`\u001b[33m${warning}\u001b[39m`);
-    confirm.mockResolvedValueOnce(true);
-    await syncCall.onClawHubRisk(createClawHubRiskRequest({ warning }));
-
-    const output = getLogOutput();
-    const occurrences = output.split(warning).length - 1;
-    expect(occurrences).toBe(1);
   });
 
   it("persists channel and runs post-update work after switching from package to git", async () => {
@@ -6953,11 +6733,11 @@ describe("update-cli", () => {
     prepareRestartScript.mockResolvedValue(null);
     serviceLoaded.mockResolvedValue(true);
     restartHealthTestControl.snapshot = {
-      runtime: { status: "running", pid: 4242 },
+      runtime: { status: "running", pid: gatewayFixturePid },
       portUsage: {
         port: 18789,
         status: "busy",
-        listeners: [{ pid: 4242, command: "openclaw-gateway" }],
+        listeners: [{ pid: gatewayFixturePid, command: "openclaw-gateway" }],
         hints: [],
       },
       healthy: false,
@@ -7363,7 +7143,6 @@ describe("update-cli", () => {
           yes: true,
           timeout: "9",
           restart: false,
-          acknowledgeClawHubRisk: true,
         });
 
         expect(doctorEnv?.OPENCLAW_UPDATE_IN_PROGRESS).toBe("1");
@@ -7380,14 +7159,12 @@ describe("update-cli", () => {
           yes: true,
         });
         expect(syncPluginCall()?.channel).toBe("stable");
-        expect(syncPluginCall()?.acknowledgeClawHubRisk).toBe(true);
         expect(lastNpmPluginUpdateCall()?.timeoutMs).toBe(9_000);
         expect(
           vi
             .mocked(readConfigFileSnapshot)
             .mock.calls.some(([options]) => options?.skipPluginValidation === true),
         ).toBe(true);
-        expect(lastNpmPluginUpdateCall()?.acknowledgeClawHubRisk).toBe(true);
         const output = lastWriteJsonCall() as
           | {
               status?: string;
@@ -7623,6 +7400,7 @@ describe("update-cli", () => {
       hash: "post-doctor",
     });
     vi.mocked(readConfigFileSnapshot)
+      .mockResolvedValueOnce(preDoctorSnapshot)
       .mockResolvedValueOnce(preDoctorSnapshot)
       .mockResolvedValueOnce(preDoctorSnapshot)
       .mockResolvedValueOnce(postDoctorSnapshot)

@@ -1,5 +1,6 @@
 import { html, nothing, type TemplateResult } from "lit";
 import { styleMap } from "lit/directives/style-map.js";
+import { controlUiAccentInk } from "../../app/accent-contrast.ts";
 import {
   TEXT_SCALE_STOPS,
   UI_APPEARANCE_DEFAULTS,
@@ -9,7 +10,6 @@ import type { ThemeTransitionContext } from "../../app/theme-transition.ts";
 import type { ThemeName } from "../../app/theme.ts";
 import { icons } from "../../components/icons.ts";
 import {
-  renderDocsLink,
   renderSettingsDefaultDescription,
   renderSettingsRow,
   renderSettingsSegmented,
@@ -17,7 +17,8 @@ import {
   renderSettingsValue,
 } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
-import { APPEARANCE_SETTINGS_TARGET_IDS } from "./settings-targets.ts";
+import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
+import { APPEARANCE_SETTINGS_TARGET_IDS } from "./route-data.ts";
 import {
   renderChatPreferencesSection,
   renderLanguageSection,
@@ -26,8 +27,6 @@ import {
   renderSidebarPreferencesSection,
 } from "./view-appearance-preferences.ts";
 import type { ConfigProps } from "./view-types.ts";
-
-const APPEARANCE_DOCS_URL = "https://docs.openclaw.ai/web/control-ui";
 
 const TEXT_SCALE_LABELS: Record<TextScaleStop, string> = {
   90: "configView.textSizes.small",
@@ -63,6 +62,21 @@ const BUILTIN_THEME_OPTIONS: ThemeOption[] = [
     id: "absolutely",
     labelKey: "configView.themes.absolutely.label",
     descriptionKey: "configView.themes.absolutely.description",
+  },
+  {
+    id: "tide",
+    labelKey: "configView.themes.tide.label",
+    descriptionKey: "configView.themes.tide.description",
+  },
+  {
+    id: "beacon",
+    labelKey: "configView.themes.beacon.label",
+    descriptionKey: "configView.themes.beacon.description",
+  },
+  {
+    id: "phosphor",
+    labelKey: "configView.themes.phosphor.label",
+    descriptionKey: "configView.themes.phosphor.description",
   },
 ];
 
@@ -117,7 +131,7 @@ function focusCustomThemeImportInput() {
       return;
     }
     if (typeof input.scrollIntoView === "function") {
-      input.scrollIntoView({ block: "center", behavior: "smooth" });
+      input.scrollIntoView({ block: "center", behavior: resolveScrollBehavior() });
     }
     input.focus();
     input.select();
@@ -168,12 +182,17 @@ export function renderAppearanceSection(
   const customAccentSelected = Boolean(
     props.accent && !ACCENT_PRESETS.some((preset) => preset.hex === props.accent),
   );
+  const selectedAccentPreset = ACCENT_PRESETS.find((preset) => preset.hex === props.accent);
+  const accentSelectionStatus =
+    props.accent == null
+      ? t("configView.appearance.usingInheritedAccent")
+      : t("configView.appearance.usingAccent", {
+          value: selectedAccentPreset
+            ? t(selectedAccentPreset.labelKey)
+            : t("configView.appearance.customAccent"),
+        });
   return html`
     <div class="settings-page">
-      <p class="settings-page__intro">
-        ${t("configView.appearance.intro")}
-        ${renderDocsLink(APPEARANCE_DOCS_URL, t("common.learnMore"))}
-      </p>
       ${renderLanguageSection(props)}
       <section id=${APPEARANCE_SETTINGS_TARGET_IDS.theme} class="settings-section">
         <div class="settings-section__header">
@@ -228,7 +247,7 @@ export function renderAppearanceSection(
               props.themeModeOverridden,
             )}
             ${themeModeProvenance}`,
-            stacked: true,
+            stackedOnNarrow: true,
             control: renderSettingsSegmented({
               value: props.themeMode,
               options: [
@@ -329,14 +348,7 @@ export function renderAppearanceSection(
         <div class="settings-section__header">
           <h2 class="settings-section__heading">${t("configView.appearance.accent")}</h2>
         </div>
-        <p class="settings-section__desc">
-          ${t("configView.appearance.accentHint")}
-          ${renderSettingsDefaultDescription(
-            t("configView.appearance.accents.default"),
-            props.accentOverridden,
-          )}
-          ${accentProvenance}
-        </p>
+        <p class="settings-section__desc">${t("configView.appearance.accentHint")}</p>
         <div class="settings-group">
           <div class="settings-row settings-row--stacked">
             <div class="settings-accent-swatches">
@@ -372,21 +384,39 @@ export function renderAppearanceSection(
                   </button>
                 `;
               })}
-              <input
-                type="color"
+              <span
                 class="settings-accent-swatch settings-accent-swatch--custom ${customAccentSelected
                   ? "settings-accent-swatch--active"
                   : ""}"
-                data-accent-custom
-                aria-label=${t("configView.appearance.customAccent")}
-                title=${t("configView.appearance.customAccent")}
-                .value=${props.accent ?? ACCENT_PRESETS[1].hex}
-                @input=${(event: Event & { currentTarget: HTMLInputElement }) =>
-                  props.setAccent(event.currentTarget.value)}
-              />
+                style=${styleMap({
+                  "--settings-accent-swatch": props.accent ?? ACCENT_PRESETS[1].hex,
+                  "--settings-accent-swatch-ink": controlUiAccentInk(
+                    props.accent ?? ACCENT_PRESETS[1].hex,
+                  ),
+                })}
+              >
+                <input
+                  type="color"
+                  class="settings-accent-swatch__input"
+                  data-accent-custom
+                  aria-label=${t("configView.appearance.customAccent")}
+                  aria-describedby="settings-accent-status"
+                  title=${t("configView.appearance.customAccent")}
+                  .value=${props.accent ?? ACCENT_PRESETS[1].hex}
+                  @input=${(event: Event & { currentTarget: HTMLInputElement }) =>
+                    props.setAccent(event.currentTarget.value)}
+                />
+                <span class="settings-accent-swatch__picker" aria-hidden="true"
+                  >${icons.pipette}</span
+                >
+              </span>
             </div>
           </div>
         </div>
+        <p id="settings-accent-status" class="settings-section__desc settings-accent-status">
+          <span class="settings-accent-status__selection">${accentSelectionStatus}</span>
+          <span class="settings-accent-status__scope">${accentProvenance}</span>
+        </p>
       </section>
 
       <section id=${APPEARANCE_SETTINGS_TARGET_IDS.textSize} class="settings-section">

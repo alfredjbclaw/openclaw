@@ -5582,6 +5582,35 @@ Update and merge these partial structured summaries.`,
     );
   });
 
+  it.each([
+    {
+      fixture: "single",
+      expectedQuestionId: "deploy_target",
+      expectedMultiSelect: undefined,
+    },
+    { fixture: "multi", expectedQuestionId: "checks", expectedMultiSelect: true },
+  ])("plans the $fixture ask_user Telegram fixture", async (entry) => {
+    const server = await startMockServer();
+    const response = await expectNonStreamingResponses(server, {
+      input: [
+        makeUserInput(
+          `tool search qa check target=ask_user ask_user_fixture=${entry.fixture}. Ask the question.`,
+        ),
+      ],
+    });
+
+    const call = outputItem(await response.json());
+    const args = JSON.parse(String(call.arguments)) as {
+      questions?: Array<{ id?: string; multiSelect?: boolean }>;
+    };
+    expect(call.name).toBe("ask_user");
+    expect(args.questions).toHaveLength(1);
+    expect(args.questions?.[0]).toMatchObject({
+      id: entry.expectedQuestionId,
+      ...(entry.expectedMultiSelect ? { multiSelect: true } : {}),
+    });
+  });
+
   it("plans QA tool-search failure calls with denied-input args", async () => {
     const server = await startMockServer();
 
@@ -8197,6 +8226,22 @@ Update and merge these partial structured summaries.`,
       ],
     });
     expect(outputText(recovered)).toBe(
+      "The requested file could not be read: ENOENT. QA-FAILED-TOOL-FINALIZED-OK",
+    );
+
+    const reconciled = await expectNonStreamingResponsesJson<{
+      output?: Array<{ content?: Array<{ text?: string }> }>;
+    }>(server, {
+      model: "gpt-5.6-luna",
+      input: [
+        makeUserInput(prompt),
+        makeUserInput(
+          "The previous Code Mode mutation may have partially applied. Do not repeat or finish any mutation. Use only the available read-only inspection tools to determine the authoritative current state, then report exactly what applied, what did not, what remains unknown, and what work is still required.",
+        ),
+        failedToolOutput,
+      ],
+    });
+    expect(outputText(reconciled)).toBe(
       "The requested file could not be read: ENOENT. QA-FAILED-TOOL-FINALIZED-OK",
     );
   });

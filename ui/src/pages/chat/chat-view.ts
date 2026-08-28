@@ -22,7 +22,6 @@ import { icons } from "../../components/icons.ts";
 import type { ImageLightboxItem } from "../../components/image-lightbox.ts";
 import type { SessionLinkTarget } from "../../components/markdown-session-links.ts";
 import type { PersonActivityRouting } from "../../components/person-activity-link.ts";
-import { renderSessionProgressCard } from "../../components/session-progress-card.ts";
 import { t } from "../../i18n/index.ts";
 import type { BoardProvider } from "../../lib/board/provider.ts";
 import type {
@@ -41,11 +40,12 @@ import type { ProviderUsageDisplayProps } from "../../lib/provider-quota-summary
 import type { SessionToolOverrides } from "../../lib/sessions/patch.ts";
 import type { UiSessionDefaultsHost } from "../../lib/sessions/session-key.ts";
 import { getChatHistoryLoadState, retryChatHistoryLoad } from "./chat-history.ts";
-import type { ChatRunStartupStatus } from "./chat-run-startup.ts";
+import { chatStartupStatusLabel, type ChatRunStartupStatus } from "./chat-run-startup.ts";
 import type { ChatState } from "./chat-state-contract.ts";
 import {
   type ChatPlacementStartupNoticeProps,
-  renderChatViewNotices,
+  renderChatComposerNotices,
+  renderChatTopbarNotices,
 } from "./chat-view-notices.ts";
 import { createChatAttachmentDropHandlers } from "./components/chat-attachments.ts";
 import type { BackgroundTasksProps } from "./components/chat-background-tasks.types.ts";
@@ -108,9 +108,8 @@ export type ChatProps = ChatTaskSuggestionTrayProps &
     waitingApproval?: boolean;
     compactionStatus?: CompactionStatus | null;
     fallbackStatus?: FallbackStatus | null;
-    /* One live placement per view: the pane picks it, so the composer bar and
-     * the right-gutter dock can never both render the same card. */
-    progressCard?: { card: ProgressCard; placement: "composer" | "dock" } | null;
+    progressCard?: ProgressCard | null;
+    progressCardHasActiveRun?: boolean;
     onDismissProgressCard?: (card: ProgressCard) => void;
     gatewayQuestionPrompts?: readonly QuestionPrompt[];
     onGatewayQuestionChange?: () => void;
@@ -153,6 +152,9 @@ export type ChatProps = ChatTaskSuggestionTrayProps &
     offline?: boolean;
     gatewayClient?: GatewayBrowserClient | null;
     composerHoldToRecord?: boolean;
+    onComposerHoldToRecordChange?: (enabled: boolean) => void;
+    onOpenTalkSettings?: () => void;
+    onOpenDictationSettings?: () => void;
     suggestionComposer?: boolean;
     typingActors?: readonly { id: string; label: string; preview?: string }[];
     onTypingChange?: (typing: boolean, preview?: string) => void;
@@ -198,6 +200,7 @@ export type ChatProps = ChatTaskSuggestionTrayProps &
     userAvatar?: string | null;
     personActivity?: PersonActivityRouting;
     localMediaPreviewRoots?: string[];
+    connectionEpoch?: number;
     assistantAttachmentAuthToken?: string | null;
     resolveArtifactDownload?: ArtifactDownloadResolver;
     autoExpandToolCalls?: boolean;
@@ -210,9 +213,9 @@ export type ChatProps = ChatTaskSuggestionTrayProps &
     onPendingReadsChange?: (delta: 1 | -1) => void;
     onAttachmentsChange?: (attachments: ChatAttachment[]) => void;
     onRemoveAttachment?: (attachment: ChatAttachment) => void;
-    onAssistantAttachmentLoaded?: () => void;
     onRequestOpenImage?: () => number;
     onOpenImage?: (item: ImageLightboxItem, requestVersion?: number) => void;
+    onAssistantAttachmentLoaded?: () => void;
     showNewMessages?: boolean;
     onScrollToBottom?: (options?: { smooth?: boolean }) => void;
     onRefresh: () => void;
@@ -222,15 +225,14 @@ export type ChatProps = ChatTaskSuggestionTrayProps &
     onRequestUpdate?: () => void;
     onHistoryKeydown?: (input: ChatInputHistoryKeyInput) => ChatInputHistoryKeyResult;
     onSlashIntent?: () => void | Promise<void>;
+    onSlashCommand?: (command: string) => void;
     onSend: ChatComposerProps["onSend"];
-    onCompact?: () => void | Promise<void>;
     onOpenSessionCheckpoints?: () => void | Promise<void>;
     onToggleRealtimeTalk?: () => void;
     onToggleRealtimeCamera?: () => void;
     onSwitchRealtimeCamera?: () => void;
     onDismissError?: () => void;
     onDismissRealtimeTalkError?: () => void;
-    onDictationError?: (message: string) => void;
     onAbort?: () => void;
     onQueueRemove: (id: string) => void;
     onQueueRetry?: (id: string) => void;
@@ -318,20 +320,24 @@ export function renderChat(props: ChatProps) {
     ? (item: ImageLightboxItem) => openImage?.(item, props.onRequestOpenImage?.())
     : undefined;
   const attachmentDropHandlers = createChatAttachmentDropHandlers({ ...props, canCompose });
+  const placementStartup =
+    props.placementStartup?.phase === "failed" ? null : props.placementStartup;
+  // Placement is visible work, but does not own an abortable model run yet.
+  const runWorking = Boolean(placementStartup) || isChatRunWorking(props);
   let chatSection: HTMLElement | null = null;
   const thread = renderChatThread(
     {
       paneId: props.paneId,
       sessionKey: props.sessionKey,
       announceTranscript: props.announceTranscript,
-      loading: props.loading,
+      loading: props.loading && !placementStartup,
       historyLoading: props.historyPagination?.loading,
       messages: props.messages,
       toolMessages: props.toolMessages,
       guardianNotices: props.guardianNotices,
       streamSegments: props.streamSegments,
       stream: props.stream,
-      streamStartedAt: props.streamStartedAt,
+      streamStartedAt: placementStartup?.startedAt ?? props.streamStartedAt,
       runId: props.runId,
       runOutputTokens: props.runOutputTokens,
       runStatus: props.runStatus,
@@ -340,8 +346,8 @@ export function renderChat(props: ChatProps) {
       showToolCalls: props.showToolCalls,
       persistCommentary: props.persistCommentary,
       runActive: Boolean(props.canAbort),
-      runWorking: isChatRunWorking(props),
-      startupStatus: props.startupStatus,
+      runWorking,
+      startupLabel: chatStartupStatusLabel(props.startupStatus, placementStartup),
       waitingApproval: props.waitingApproval,
       questionPrompts: props.gatewayQuestionPrompts,
       sessions: props.sessions,
@@ -359,6 +365,7 @@ export function renderChat(props: ChatProps) {
       fullMessageAgentId: props.fullMessageAgentId,
       loadFullAssistantMessage: props.loadFullAssistantMessage,
       localMediaPreviewRoots: props.localMediaPreviewRoots,
+      connectionEpoch: props.connectionEpoch,
       assistantAttachmentAuthToken: props.assistantAttachmentAuthToken,
       resolveArtifactDownload: props.resolveArtifactDownload,
       canvasPluginSurfaceUrl: props.canvasPluginSurfaceUrl,
@@ -372,9 +379,9 @@ export function renderChat(props: ChatProps) {
       onOpenWorkspaceFile: props.onOpenWorkspaceFile,
       onOpenSessionLink: props.onOpenSessionLink,
       onOpenSessionCheckpoints: props.onOpenSessionCheckpoints,
-      onAssistantAttachmentLoaded: props.onAssistantAttachmentLoaded,
       onRequestOpenImage: props.onRequestOpenImage,
       onOpenImage: openImage,
+      onAssistantAttachmentLoaded: props.onAssistantAttachmentLoaded,
       onRequestUpdate: requestUpdate,
       onChatScroll: props.onChatScroll,
       onHistoryIntent: props.onHistoryIntent,
@@ -412,13 +419,21 @@ export function renderChat(props: ChatProps) {
     disabledReasonTone: props.disabledReasonTone,
     disabledBanner: props.disabledBanner,
     runError: props.runError,
+    anchoredNotices: renderChatComposerNotices({
+      runError: props.runError,
+      workspaceConflict: props.workspaceConflict,
+      onDismissWorkspaceConflict: props.onDismissWorkspaceConflict,
+      placementStartup: props.placementStartup,
+      onRetrySessionPlacementStartup: props.onRetrySessionPlacementStartup,
+    }),
     sending: props.sending,
     canAbort: props.canAbort,
     runStatus: props.runStatus,
     waitingApproval: props.waitingApproval,
     compactionStatus: props.compactionStatus,
     fallbackStatus: props.fallbackStatus,
-    progressCard: props.progressCard?.placement === "composer" ? props.progressCard.card : null,
+    progressCard: props.progressCard,
+    progressCardHasActiveRun: props.progressCardHasActiveRun,
     onDismissProgressCard: props.onDismissProgressCard,
     gatewayQuestionPrompts: props.gatewayQuestionPrompts,
     messages: props.messages,
@@ -454,6 +469,9 @@ export function renderChat(props: ChatProps) {
     realtimeTalkCameraError: props.realtimeTalkCameraError,
     gatewayClient: props.gatewayClient,
     composerHoldToRecord: props.composerHoldToRecord,
+    onComposerHoldToRecordChange: props.onComposerHoldToRecordChange,
+    onOpenTalkSettings: props.onOpenTalkSettings,
+    onOpenDictationSettings: props.onOpenDictationSettings,
     suggestionComposer: props.suggestionComposer,
     typingActors: props.typingActors,
     onTypingChange: props.onTypingChange,
@@ -464,13 +482,12 @@ export function renderChat(props: ChatProps) {
     onRequestUpdate: requestUpdate,
     onHistoryKeydown: props.onHistoryKeydown,
     onSlashIntent: props.onSlashIntent,
+    onSlashCommand: props.onSlashCommand,
     onSend: props.onSend,
-    onCompact: props.suggestionComposer ? undefined : props.onCompact,
     onToggleRealtimeTalk: props.suggestionComposer ? undefined : props.onToggleRealtimeTalk,
     onToggleRealtimeCamera: props.onToggleRealtimeCamera,
     onSwitchRealtimeCamera: props.onSwitchRealtimeCamera,
     onDismissRealtimeTalkError: props.onDismissRealtimeTalkError,
-    onDictationError: props.onDictationError,
     onAbort: props.onAbort,
     onQueueRemove: props.onQueueRemove,
     onQueueRetry: props.onQueueRetry,
@@ -487,17 +504,10 @@ export function renderChat(props: ChatProps) {
     onOpenImage: openImmediateImage,
   });
   const taskSuggestionTray = renderChatTaskSuggestionTray(props);
-  const dockedProgressCard =
-    props.progressCard?.placement === "dock"
-      ? renderSessionProgressCard(props.progressCard.card, "dock", props.onDismissProgressCard)
-      : nothing;
-  // One column owns the conversation's top-right gutter. Both members float over
-  // the transcript, so sharing a stack is what stops the wider suggestion tray
-  // from silently covering the progress card when they appear together.
   const gutterStack =
-    taskSuggestionTray === nothing && dockedProgressCard === nothing
+    taskSuggestionTray === nothing
       ? nothing
-      : html`<div class="chat-gutter-stack">${taskSuggestionTray}${dockedProgressCard}</div>`;
+      : html`<div class="chat-gutter-stack">${taskSuggestionTray}</div>`;
   const scrollToBottomButton =
     props.showNewMessages && props.onScrollToBottom
       ? html`
@@ -541,6 +551,7 @@ export function renderChat(props: ChatProps) {
     historyLoadState?.phase === "failed" &&
     historyLoadState.sessionKey === props.sessionKey;
   const transcriptEmpty =
+    !runWorking &&
     props.messages.length === 0 &&
     props.toolMessages.length === 0 &&
     props.streamSegments.length === 0 &&
@@ -612,10 +623,10 @@ export function renderChat(props: ChatProps) {
             <div class="chat-main">
               <div class="chat-main__conversation-column">
                 ${props.header ?? nothing}
-                ${renderChatViewNotices({
+                ${renderChatTopbarNotices({
                   ...props,
-                  error: props.error ?? props.runError?.summary ?? null,
-                  onDismissError: props.error != null ? props.onDismissError : undefined,
+                  error: props.error,
+                  onDismissError: props.onDismissError,
                 })}
                 ${renderTranscriptSearch(props.paneId, requestUpdate)}
                 <div class="chat-main__conversation">

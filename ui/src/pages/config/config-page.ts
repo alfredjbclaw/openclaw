@@ -12,14 +12,13 @@ import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ModelCatalogEntry } from "../../api/types.ts";
 import { titleForRoute } from "../../app-navigation.ts";
 import { pathForRoute, type RouteId } from "../../app-route-paths.ts";
-import { isBrowserPanelAvailable } from "../../app/app-shell-chrome.ts";
 import {
   applicationContext,
   type ApplicationContext,
   type ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
-import { importCustomThemeFromUrl } from "../../app/custom-theme.ts";
-import { hasOperatorAdminAccess } from "../../app/operator-access.ts";
+import { hasOperatorAdminAccess, hasOperatorWriteAccess } from "../../app/operator-access.ts";
+import { isBrowserPanelAvailable } from "../../app/panel-availability.ts";
 import {
   resetServerUiPref,
   resolveServerUiPrefState,
@@ -45,6 +44,7 @@ import {
   SIDEBAR_HIDDEN_SESSION_CATALOGS_CHANGED_EVENT,
   setStoredSessionCatalogHidden,
 } from "../../components/app-sidebar-session-types.ts";
+import { renderLearnMoreLink, renderSettingsPageHeader } from "../../components/settings-ui.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
 import { i18n, isSupportedLocale, t, type Locale } from "../../i18n/index.ts";
 import { resolveControlUiServerQueueMode } from "../../lib/chat/follow-up-mode.ts";
@@ -52,6 +52,7 @@ import { formatUiError } from "../../lib/format-error.ts";
 import { isMissingOperatorReadScopeError } from "../../lib/gateway-errors.ts";
 import { canCallGatewayMethod } from "../../lib/gateway-methods.ts";
 import { loadModels } from "../../lib/model-catalog-store.ts";
+import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { PollController } from "../../lit/poll-controller.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
@@ -72,6 +73,7 @@ import {
   type ConfigPageId,
 } from "./config-sections.ts";
 import * as themeImport from "./custom-theme-import-owner.ts";
+import { importCustomThemeFromUrl } from "./custom-theme-import.ts";
 import { renderMcp } from "./mcp.ts";
 import { renderMemoryPage } from "./memory-page.ts";
 import { narrowMemorySchema } from "./memory-schema.ts";
@@ -180,6 +182,26 @@ export function configSelectionFromSearch(pageId: ConfigPageId, search: string):
 
 function configPageTitle(pageId: ConfigPageId): string {
   return titleForRoute(pageId);
+}
+
+function renderConfigPageSubtitle(pageId: ConfigPageId) {
+  switch (pageId) {
+    case "appearance":
+      return html`${t("configView.appearance.intro")}
+      ${renderLearnMoreLink("https://docs.openclaw.ai/web/control-ui")}`;
+    case "mcp":
+      return html`${t("mcpPage.intro")} ${renderLearnMoreLink("https://docs.openclaw.ai/tools/mcp")}`;
+    case "security":
+      return html`${t("quickSettings.security.intro")}
+      ${renderLearnMoreLink("https://docs.openclaw.ai/gateway/security")}`;
+    case "talk":
+      return html`${t("talkPage.intro")}
+      ${renderLearnMoreLink("https://docs.openclaw.ai/nodes/talk")}`;
+    case "updates":
+      return t("updates.page.intro");
+    default:
+      return undefined;
+  }
 }
 
 export function extractQuickSettingsSecurity(config: unknown): SecurityOverview {
@@ -600,7 +622,7 @@ export class ConfigPage extends OpenClawLightDomElement {
     if (!target) {
       return;
     }
-    target.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    target.scrollIntoView?.({ behavior: resolveScrollBehavior(), block: "start" });
     this.pendingRouteTargetId = null;
   }
 
@@ -871,7 +893,10 @@ export class ConfigPage extends OpenClawLightDomElement {
       "theme",
       this.context.gateway.connection.gatewayUrl,
       this.settings,
-      { canSync: this.serverUiPrefsCanSync() },
+      {
+        canSync: this.serverUiPrefsCanSync("theme"),
+        profileId: this.context.gateway.snapshot?.selfUser?.id,
+      },
     );
   }
 
@@ -881,7 +906,10 @@ export class ConfigPage extends OpenClawLightDomElement {
       "themeMode",
       this.context.gateway.connection.gatewayUrl,
       this.settings,
-      { canSync: this.serverUiPrefsCanSync() },
+      {
+        canSync: this.serverUiPrefsCanSync("themeMode"),
+        profileId: this.context.gateway.snapshot?.selfUser?.id,
+      },
     );
   }
 
@@ -891,7 +919,10 @@ export class ConfigPage extends OpenClawLightDomElement {
       "accent",
       this.context.gateway.connection.gatewayUrl,
       this.settings,
-      { canSync: this.serverUiPrefsCanSync() },
+      {
+        canSync: this.serverUiPrefsCanSync("accent"),
+        profileId: this.context.gateway.snapshot?.selfUser?.id,
+      },
     );
   }
 
@@ -915,9 +946,15 @@ export class ConfigPage extends OpenClawLightDomElement {
     );
   }
 
-  private serverUiPrefsCanSync(): boolean | null {
+  private serverUiPrefsCanSync(key?: "theme" | "themeMode" | "accent"): boolean | null {
     const runtimeConfig = this.context.runtimeConfig;
-    return runtimeConfig.state.connected ? runtimeConfig.canPatch !== false : null;
+    if (!runtimeConfig.state.connected) {
+      return null;
+    }
+    const gateway = this.context.gateway.snapshot;
+    return key && gateway?.selfUser
+      ? hasOperatorWriteAccess(gateway.hello?.auth ?? null)
+      : runtimeConfig.canPatch !== false;
   }
 
   private resetLocale() {
@@ -1481,11 +1518,10 @@ export class ConfigPage extends OpenClawLightDomElement {
       ${this.pageId === "memory"
         ? nothing
         : html`
-            <section class="content-header">
-              <div>
-                <div class="page-title">${configPageTitle(this.pageId)}</div>
-              </div>
-            </section>
+            ${renderSettingsPageHeader({
+              title: configPageTitle(this.pageId),
+              subtitle: renderConfigPageSubtitle(this.pageId),
+            })}
           `}
       ${renderSettingsWorkspace(body)}
     `;

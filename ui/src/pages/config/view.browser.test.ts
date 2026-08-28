@@ -223,6 +223,36 @@ describe("config view", () => {
     return container.textContent?.replace(/\s+/g, " ").trim() ?? "";
   }
 
+  it("describes the custom accent source and selected state through the native input", () => {
+    const inherited = renderConfigView({
+      accent: undefined,
+      accentProvenance: "default",
+      activeSection: "__appearance__",
+      includeSections: ["__appearance__"],
+    });
+    const inheritedInput =
+      inherited.container.querySelector<HTMLInputElement>("[data-accent-custom]");
+    expect(inherited.container.querySelector("#settings-accent-status")?.textContent).toContain(
+      "Using inherited accent",
+    );
+    expect(inheritedInput?.getAttribute("aria-describedby")).toBe("settings-accent-status");
+
+    const custom = renderConfigView({
+      accent: "#c3cfdb",
+      accentProvenance: "device-local",
+      activeSection: "__appearance__",
+      includeSections: ["__appearance__"],
+    });
+    expect(custom.container.querySelector("#settings-accent-status")?.textContent).toContain(
+      "Using Custom color",
+    );
+    expect(
+      custom.container
+        .querySelector<HTMLElement>(".settings-accent-swatch--custom")
+        ?.style.getPropertyValue("--settings-accent-swatch-ink"),
+    ).toBe("#000000");
+  });
+
   it("places a Control UI Browser preference in the same settings group before schema rows", () => {
     const { container } = renderConfigView({
       schema: {
@@ -876,6 +906,114 @@ describe("config view", () => {
     enableButton.click();
     expect(onWebPushSubscribe).toHaveBeenCalledOnce();
   });
+
+  it.each(["tabs", "accordion"] as const)(
+    "groups channel settings without changing patch paths (%s)",
+    (settingsLayout) => {
+      const { container, props } = renderConfigView({
+        activeSection: "channels",
+        settingsLayout,
+        forceShowAdvanced: true,
+        schema: {
+          type: "object",
+          properties: {
+            channels: {
+              type: "object",
+              additionalProperties: true,
+              properties: {
+                telegram: {
+                  type: "object",
+                  properties: { username: { type: "string", title: "Bot username" } },
+                },
+                "custom-chat": {
+                  anyOf: [
+                    { type: "object", properties: { room: { type: "string", title: "Room" } } },
+                    { type: "null" },
+                  ],
+                },
+                defaults: {
+                  type: "object",
+                  properties: { groupPolicy: { type: "string", title: "Group policy" } },
+                },
+                modelByChannel: {
+                  type: "object",
+                  additionalProperties: {
+                    type: "object",
+                    additionalProperties: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+        },
+        uiHints: {
+          "channels.telegram": { label: "Telegram" },
+          "channels.custom-chat": { label: "Custom Chat" },
+          "channels.modelByChannel": { label: "Channel Model Overrides" },
+        },
+        formValue: {
+          channels: {
+            telegram: { username: "test_bot" },
+            "custom-chat": { room: "team" },
+            defaults: { groupPolicy: "allowlist" },
+            modelByChannel: {},
+          },
+        },
+      });
+      document.body.append(container);
+      try {
+        const picker = queryRequired(container, "select", HTMLSelectElement);
+        expect(picker.labels?.[0]?.textContent).toContain("Channel settings");
+        expect(Array.from(picker.options, (option) => option.textContent?.trim())).toEqual([
+          "Custom Chat",
+          "Telegram",
+          "Other",
+        ]);
+        expect(picker.selectedOptions[0]?.textContent?.trim()).toBe("Other");
+        const content = () =>
+          normalizedText(queryRequired(container, ".settings-page", HTMLElement));
+        expect(content()).toContain("Group policy");
+        expect(content()).toContain("Channel Model Overrides");
+        expect(content()).not.toContain("Bot username");
+        props.onSubsectionChange = (key) => {
+          props.activeSubsection = key;
+          render(renderConfig(props), container);
+        };
+        render(renderConfig(props), container);
+        const choose = (key: string) => {
+          picker.value = key;
+          picker.dispatchEvent(new Event("change", { bubbles: true }));
+        };
+        choose("telegram");
+        expect(content()).toContain("Bot username");
+        expect(content()).not.toContain("Group policy");
+        expect(content()).not.toContain("Room");
+        const username = queryRequired(container, 'input[type="text"]', HTMLInputElement);
+        expect(username.value).toBe("test_bot");
+        username.value = "updated_bot";
+        username.dispatchEvent(new Event("input", { bubbles: true }));
+        expect(props.onFormPatch).toHaveBeenCalledWith(
+          ["channels", "telegram", "username"],
+          "updated_bot",
+        );
+        choose("custom-chat");
+        expect(content()).toContain("Room");
+        expect(content()).not.toContain("Bot username");
+        choose("");
+        const policy = queryRequired(container, 'input[type="text"]', HTMLInputElement);
+        policy.value = "open";
+        policy.dispatchEvent(new Event("input", { bubbles: true }));
+        expect(props.onFormPatch).toHaveBeenCalledWith(
+          ["channels", "defaults", "groupPolicy"],
+          "open",
+        );
+        render(renderConfig({ ...props, formMode: "raw" }), container);
+        expect(container.querySelector("select")).toBeNull();
+      } finally {
+        container.remove();
+      }
+    },
+  );
 
   it("resets config content scroll when switching top-tab sections", async () => {
     const { container } = renderConfigView({
@@ -1720,7 +1858,7 @@ describe("config view", () => {
     resetIn(row("Message width"));
     resetIn(row("Send shortcut"));
     resetIn(row("Open external sessions in"));
-    resetIn(row("Hold microphone button to dictate"));
+    resetIn(row("Hold microphone button to start dictation"));
     resetIn(row("Lobster visits"));
     resetIn(row("Lobster sounds"));
 
@@ -1879,7 +2017,7 @@ describe("config view", () => {
     for (const title of [
       "Message width",
       "Open external sessions in",
-      "Hold microphone button to dictate",
+      "Hold microphone button to start dictation",
     ]) {
       expect(row(title)?.textContent).toContain("Stored in this browser only");
       expect(row(title)?.textContent).not.toContain("Synced across your devices");
@@ -2016,7 +2154,7 @@ describe("config view", () => {
       "System default",
       "Desk Camera",
     ]);
-    expect(container.textContent).toContain("Hold microphone button to dictate");
+    expect(container.textContent).toContain("Hold microphone button to start dictation");
 
     microphoneSelect.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     cameraSelect.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 }));

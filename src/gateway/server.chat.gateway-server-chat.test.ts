@@ -2426,6 +2426,9 @@ describe("gateway server chat", () => {
           },
         },
       });
+      agentDiscoveryMock.enabled = true;
+      agentDiscoveryMock.models = [{ id: "gpt-5", provider: "openai", reasoning: true }];
+      await prepareGatewayReplyRuntimeForTest({ force: true });
 
       const historyRes = await rpcReq<{
         thinkingLevel?: string;
@@ -2436,6 +2439,7 @@ describe("gateway server chat", () => {
       expect(historyRes.payload?.thinkingLevel).toBe("minimal");
       expect(historyRes.payload?.sessionInfo?.thinkingLevel).toBeUndefined();
     } finally {
+      Object.assign(agentDiscoveryMock, { enabled: false, models: [] });
       testState.agentConfig = undefined;
       testState.agentsConfig = undefined;
       testState.sessionStorePath = undefined;
@@ -2660,6 +2664,7 @@ describe("gateway server chat", () => {
     await withMainSessionStore(async () => {
       const runId = "idem-wait-chat-active-with-agent-lifecycle";
       const blockedReply = createDeferred();
+      const runtimeStarted = createDeferred();
       mockGetReplyFromConfigOnce(async (_ctx, opts) => {
         opts?.onAgentRunStart?.(runId);
         const runtimeOwner = claimAgentRunContext(
@@ -2673,6 +2678,7 @@ describe("gateway server chat", () => {
           { ownsContext: true, trackOwner: true },
         );
         expect(runtimeOwner).toBeDefined();
+        runtimeStarted.resolve();
         try {
           await blockedReply.promise;
         } finally {
@@ -2684,6 +2690,8 @@ describe("gateway server chat", () => {
         const subscribeRes = await rpcReq(ws, "sessions.subscribe", {});
         expect(subscribeRes.ok).toBe(true);
         await sendChatAndExpectStarted(runId, "hold chat run open");
+        // The ACK precedes dispatch; emit lifecycle only after the runtime owns this run.
+        await runtimeStarted.promise;
 
         const terminalSessionChange = onceMessage(
           ws,

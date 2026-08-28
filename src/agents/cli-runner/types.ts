@@ -378,7 +378,6 @@ export type PreparedCliRunContext = {
   systemPrompt: string;
   systemPromptReport: SessionSystemPromptReport;
   claudeSkillsPluginArgs: string[];
-  bootstrapPromptWarningLines: string[];
   openClawHistoryPrompt?: string;
   authEpoch?: string;
   /** Strict owner fingerprint captured for live inference verification only. */

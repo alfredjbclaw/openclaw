@@ -47,6 +47,15 @@ function expectProcessPid(pid: number | undefined): number {
   return pid;
 }
 
+// Call after installing handlers and keepalive: existence must mean a complete, ready PID.
+function publishReadyPidScript(argIndex: number): string {
+  return `
+const pidPath = process.argv[${argIndex}];
+fs.writeFileSync(pidPath + ".tmp", String(process.pid));
+fs.renameSync(pidPath + ".tmp", pidPath);
+`;
+}
+
 describe("managed-child-process", () => {
   it("maps forwarded signals to shell-compatible exit codes", () => {
     expect(signalExitCode("SIGHUP")).toBe(129);
@@ -379,7 +388,7 @@ describe("managed-child-process", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
-  it("shares process signal listeners across parallel managed commands", async () => {
+  it("shares signal listeners across parallel commands even when another spawn throws", async () => {
     const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as const;
     const baseline = new Map(signals.map((signal) => [signal, process.listenerCount(signal)]));
     const children: Array<Parameters<typeof terminateManagedChild>[0]> = [];
@@ -399,6 +408,9 @@ describe("managed-child-process", () => {
 
     try {
       await waitFor(() => readyCount === commands.length);
+      await expect(runManagedCommand({ bin: "invalid\0command" })).rejects.toMatchObject({
+        code: "ERR_INVALID_ARG_VALUE",
+      });
       for (const signal of signals) {
         expect(process.listenerCount(signal)).toBe((baseline.get(signal) ?? 0) + 1);
       }
@@ -414,6 +426,16 @@ describe("managed-child-process", () => {
     }
   });
 
+  it.each([
+    { bin: "invalid\0command", code: "ERR_INVALID_ARG_VALUE" },
+    { bin: "/missing/openclaw-test-command", code: "ENOENT" },
+  ])("restores signal listeners after a $code spawn failure", async ({ bin, code }) => {
+    const signals = ["SIGHUP", "SIGINT", "SIGTERM"] as const;
+    const baseline = signals.map((signal) => process.listenerCount(signal));
+    await expect(runManagedCommand({ bin, shell: false })).rejects.toMatchObject({ code });
+    expect(signals.map((signal) => process.listenerCount(signal))).toEqual(baseline);
+  });
+
   it("times out and kills managed command descendants", async () => {
     const dir = createTempDir("openclaw-managed-timeout-");
     const childPath = path.join(dir, "child.mjs");
@@ -427,12 +449,18 @@ import fs from "node:fs";
 
 spawn(process.execPath, [
   "-e",
-  "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 5_000); setInterval(() => {}, 1000);",
+  ${JSON.stringify(`
+const fs = require("node:fs");
+process.on("SIGTERM", () => {});
+setTimeout(() => process.exit(0), 5_000);
+setInterval(() => {}, 1000);
+${publishReadyPidScript(1)}
+`)},
   process.argv[3],
 ], { stdio: "ignore" });
-fs.writeFileSync(process.argv[2], String(process.pid));
 process.on("SIGTERM", () => {});
 setInterval(() => {}, 1_000);
+${publishReadyPidScript(2)}
 `,
       "utf8",
     );
@@ -734,14 +762,19 @@ child.once("message", () => process.exit(0));
 
 	spawn(process.execPath, [
 	  "-e",
-	  "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
+	  ${JSON.stringify(`
+const fs = require("node:fs");
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+${publishReadyPidScript(1)}
+`)},
 	  process.argv[3],
 	], { stdio: "ignore" });
-	fs.writeFileSync(process.argv[2], String(process.pid));
 	for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) {
 	  process.on(signal, () => process.exit(0));
 	}
 setInterval(() => {}, 1_000);
+${publishReadyPidScript(2)}
 `,
         "utf8",
       );

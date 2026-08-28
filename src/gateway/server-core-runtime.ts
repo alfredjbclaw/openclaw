@@ -279,6 +279,7 @@ export async function startGatewayCoreRuntime(input: {
 
   const {
     execApprovalManager,
+    questionManager,
     cancelRunBoundApprovals,
     forwardPluginApprovalRequest,
     pluginApprovalIosPushDelivery,
@@ -582,6 +583,12 @@ export async function startGatewayCoreRuntime(input: {
           channelManager.setAmbientAutostartSuppressedChannelIds(
             nextAmbientAutostartSuppressedChannelIds,
           );
+          const nextPluginMetadataSnapshot = completePluginMetadataSnapshot({
+            snapshot: nextPluginLookUpTable,
+            config: params.sourceConfig,
+            env: params.env,
+            workspaceDir: pluginWorkspaceDir,
+          });
           loaded = prepareGatewayPluginLoad({
             cfg: params.nextConfig,
             activationSourceConfig: params.sourceConfig,
@@ -591,14 +598,9 @@ export async function startGatewayCoreRuntime(input: {
             hostServices: pluginHostServices,
             baseMethods,
             pluginLookUpTable: nextPluginLookUpTable,
+            pluginMetadataSnapshot: nextPluginMetadataSnapshot,
             ambientEnvTriggers,
             resolveGatewayContext: resolvePluginGatewayContext,
-          });
-          const nextPluginMetadataSnapshot = completePluginMetadataSnapshot({
-            snapshot: nextPluginLookUpTable,
-            config: params.sourceConfig,
-            env: params.env,
-            workspaceDir: pluginWorkspaceDir,
           });
           setCurrentPluginMetadataSnapshot(nextPluginMetadataSnapshot, {
             config: params.sourceConfig,
@@ -665,6 +667,7 @@ export async function startGatewayCoreRuntime(input: {
     sessionObserver,
     approvalSessionEvents,
     execApprovalManager,
+    questionManager,
     cancelRunBoundApprovals,
     forwardPluginApprovalRequest,
     pluginApprovalIosPushDelivery,

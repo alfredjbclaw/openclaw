@@ -188,6 +188,7 @@ import {
 } from "../../infra/outbound/outbound-session.js";
 import { buildOutboundSessionContext } from "../../infra/outbound/session-context.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
+import { logError } from "../../logger.js";
 import {
   dispatchCronDelivery,
   queueCronMessageToolDeliveryAwareness,
@@ -1781,6 +1782,35 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     );
   });
 
+  it("carries the exact cron run's required creator to a newly delivered destination", async () => {
+    mockResolvedOutboundRoute({
+      sessionKey: "agent:main:telegram:direct:123456",
+      baseSessionKey: "agent:main:telegram:direct:123456",
+      to: "telegram:123456",
+    });
+    const params = makeBaseParams({
+      synthesizedText: "Required cron delivery",
+      runSessionKey: "agent:main:cron:job:run:required-run",
+    });
+    params.cfgWithAgentDefaults = {
+      gateway: {
+        roles: {
+          default: "guest",
+          definitions: {
+            guest: { sessions: { others: "none" }, agents: "*", scopes: [], sandbox: "required" },
+          },
+        },
+      },
+    };
+    const state = await dispatchCronDelivery(params);
+    expect(state.delivered).toBe(true);
+    expect(ensureOutboundSessionEntry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceSessionKey: params.runSessionKey,
+      }),
+    );
+  });
+
   it("canonicalizes routed main-session aliases before the awareness duplicate guard", async () => {
     mockResolvedOutboundRoute({
       sessionKey: "agent:main:main",
@@ -1805,6 +1835,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
       sessionKey: "agent:main:work",
     });
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: params.cfgWithAgentDefaults,
       channel: "telegram",
       accountId: undefined,
@@ -1845,6 +1876,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
       sessionKey: "agent:main:work:thread:42",
     });
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: params.cfgWithAgentDefaults,
       channel: "telegram",
       accountId: undefined,
@@ -1969,11 +2001,16 @@ describe("dispatchCronDelivery — double-announce guard", () => {
 
     const state = await dispatchCronDelivery(params);
 
+    const deliveryError = expect.stringContaining(
+      "scheduled at 2026-03-18T13:59:59.999Z, started 180m late",
+    );
     expectResultFields(state.result, {
       status: "ok",
       delivered: false,
       deliveryAttempted: true,
+      deliveryError,
     });
+    expect(state.deliveryError).toEqual(deliveryError);
     expect(deliverOutboundPayloads).not.toHaveBeenCalled();
   });
 
@@ -2602,6 +2639,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     // onDeliveryResult.
     expect(ensureOutboundSessionEntry).toHaveBeenCalledTimes(1);
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: expect.anything(),
       channel: "telegram",
       route: expect.objectContaining({ to: "telegram:123456", from: "telegram:123456" }),
@@ -3021,6 +3059,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     // conversation. Matches the partial-failure safety net in gateway send.ts.
     expect(ensureOutboundSessionEntry).toHaveBeenCalledTimes(1);
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: expect.anything(),
       channel: "telegram",
       route: expect.objectContaining({ to: "telegram:123456", from: "telegram:123456" }),
@@ -3062,6 +3101,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     // partial-failure safety net in gateway server-methods/send.ts.
     expect(ensureOutboundSessionEntry).toHaveBeenCalledTimes(1);
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: expect.anything(),
       channel: "telegram",
       route: expect.objectContaining({ to: "telegram:123456", from: "telegram:123456" }),
@@ -3123,6 +3163,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     // Once-only: the throw-path safety net must not double-commit.
     expect(ensureOutboundSessionEntry).toHaveBeenCalledTimes(1);
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: expect.anything(),
       channel: "telegram",
       route: expect.objectContaining({ to: "telegram:123456", from: "telegram:123456" }),
@@ -3142,6 +3183,9 @@ describe("dispatchCronDelivery — double-announce guard", () => {
       error: "boom",
       deliveryAttempted: true,
     });
+    expect(logError).toHaveBeenCalledExactlyOnceWith(
+      "[cron:test-job] delivery failed (required): boom",
+    );
   });
 
   it("records structured direct delivery failures when best-effort is enabled", async () => {
@@ -3160,6 +3204,9 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     expect(state.delivered).toBe(false);
     expect(state.deliveryAttempted).toBe(true);
     expect(state.deliveryError).toBe("boom");
+    expect(logError).toHaveBeenCalledExactlyOnceWith(
+      "[cron:test-job] delivery failed (bestEffort): boom",
+    );
   });
 
   it("no delivery requested means deliveryAttempted stays false and no delivery is sent", async () => {
@@ -3524,6 +3571,7 @@ describe("dispatchCronDelivery — double-announce guard", () => {
       threadId: undefined,
     });
     expect(ensureOutboundSessionEntry).toHaveBeenCalledWith({
+      sourceSessionKey: "agent:main",
       cfg: params.cfgWithAgentDefaults,
       channel: "whatsapp",
       accountId: undefined,

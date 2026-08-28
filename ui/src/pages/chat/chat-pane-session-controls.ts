@@ -31,7 +31,7 @@ type SessionActionAccess = ReturnType<typeof readChatSessionActionAccess>;
 type SessionAction = keyof SessionActionAccess;
 type SessionActionCallbacks = Pick<
   ChatProps,
-  "onAbort" | "onClearHistory" | "onCompact" | "onForkMessage" | "onRewindMessage"
+  "onAbort" | "onClearHistory" | "onForkMessage" | "onRewindMessage"
 >;
 
 export function readChatPaneMutationAccess(
@@ -104,6 +104,13 @@ export function renderChatPaneComposerControls(params: {
     onModelSetup,
   } = params;
   const modelCatalogState = resolveChatModelCatalogState(state);
+  const thinkingLevelOverride = state.sessions.think(
+    state.sessionKey,
+    scopedAgentParamsForSession(state, state.sessionKey).agentId,
+  );
+  const thinkingSession = thinkingLevelOverride
+    ? { ...selectedSession, thinkingLevel: thinkingLevelOverride }
+    : selectedSession;
   return {
     composerControls: html`
       <div class="chat-composer-model-control">
@@ -116,8 +123,10 @@ export function renderChatPaneComposerControls(params: {
           modelCatalog: state.chatModelCatalog,
           modelCatalogState,
           modelOverrides: state.sessions.state.modelOverrides,
+          thinkingSession,
           modelSelectionLocked: selectedSession?.modelSelectionLocked === true,
           modelSelectionRuntimeId: selectedSession?.agentRuntime?.id,
+          modelPickerOpen: state.chatModelPickerOpenSessionKey === state.sessionKey,
           modelSwitching: Boolean(state.chatModelSwitchPromises[state.sessionKey]),
           modelsLoading: state.chatModelsLoading,
           modelMutationDisabledReason: modelAccess.allowed ? undefined : modelAccess.reason,
@@ -137,6 +146,9 @@ export function renderChatPaneComposerControls(params: {
               ? switchChatContextWindow(state, next, targetSessionKey)
               : Promise.resolve(false),
           onModelPickerOpen: () => refreshChatModelCatalogOnDemand(state),
+          onModelPickerOpenChange: (open) => {
+            state.chatModelPickerOpenSessionKey = open ? state.sessionKey : null;
+          },
           onModelSelect: (next, targetSessionKey) =>
             modelAccess.allowed
               ? switchChatModel(state, next, targetSessionKey)
@@ -153,7 +165,6 @@ export function renderChatPaneComposerControls(params: {
       disabled: !permissionAccess.allowed,
       disabledReason: permissionAccess.allowed ? undefined : permissionAccess.reason,
       mode: selectedSession?.permissionMode,
-      sessionRoot: selectedSession?.sessionRoot,
       onSelect: async (permissionMode) => {
         if (!permissionAccess.allowed) {
           return;
@@ -216,7 +227,6 @@ export function createChatPaneSessionActionCallbacks(params: {
   hasLocalRun: () => boolean;
   sessionParticipationBlocked: boolean;
   onDenied: (reason: string) => void;
-  onCompact: () => void;
   onAbort: () => void;
   onRewind: (entryId: string) => Promise<boolean>;
   onFork: (entryId: string) => Promise<void>;
@@ -232,13 +242,6 @@ export function createChatPaneSessionActionCallbacks(params: {
     return false;
   };
   return {
-    onCompact: access.compact.allowed
-      ? () => {
-          if (requireCurrent("compact")) {
-            params.onCompact();
-          }
-        }
-      : undefined,
     onAbort:
       params.sessionParticipationBlocked || !access.abort.allowed
         ? undefined

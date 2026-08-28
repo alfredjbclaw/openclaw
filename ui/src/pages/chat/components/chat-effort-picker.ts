@@ -1,4 +1,5 @@
-import { html, nothing } from "lit";
+import { html, nothing, svg } from "lit";
+import { strokeIcon } from "../../../components/icons-tools.ts";
 import { icons } from "../../../components/icons.ts";
 import "../../../components/tooltip.ts";
 import { t } from "../../../i18n/index.ts";
@@ -6,7 +7,10 @@ import type {
   ChatFastModeSelectState,
   ChatFastModeSelectValue,
 } from "../../../lib/chat/model-select-state.ts";
-import type { ChatThinkingSelectState } from "../../../lib/chat/thinking.ts";
+import {
+  normalizeThinkingOptionValue,
+  type ChatThinkingSelectState,
+} from "../../../lib/chat/thinking.ts";
 import { handleChatComposerDetailsToggle, syncChatPickerOverlay } from "./chat-picker-overlay.ts";
 
 type ChatEffortPickerParams = {
@@ -20,6 +24,7 @@ type ChatEffortPickerParams = {
   onFastModeSelect: (value: ChatFastModeSelectValue, sessionKey: string) => Promise<unknown>;
   onRequestUpdate?: () => void;
   onThinkingSelect: (value: string, sessionKey: string) => Promise<unknown>;
+  reserved?: boolean;
 };
 
 function formatEffortLabel(label: string): string {
@@ -29,10 +34,18 @@ function formatEffortLabel(label: string): string {
 export function renderChatEffortPicker(params: ChatEffortPickerParams) {
   const sliderStops = params.thinking.options;
   const showReasoning = sliderStops.length > 0;
-  if (!showReasoning && (!params.showFastMode || !params.fastMode.supported)) {
+  if (!params.reserved && !showReasoning && (!params.showFastMode || !params.fastMode.supported)) {
     return nothing;
   }
   const selection = params.thinking.selection;
+  const effortIsOff = normalizeThinkingOptionValue(selection.value) === "off";
+  const effortFraction =
+    effortIsOff || selection.kind === "unanchored"
+      ? 0
+      : sliderStops.length > 1
+        ? selection.index / (sliderStops.length - 1)
+        : 1;
+  const effortAngle = -120 + effortFraction * 240;
   const hasThinkingOverride = selection.source === "override";
   const selectedThinkingValue = hasThinkingOverride ? selection.value : "";
   const sliderIndex = selection.kind === "anchored" ? selection.index : 0;
@@ -45,9 +58,11 @@ export function renderChatEffortPicker(params: ChatEffortPickerParams) {
     ? reasoningValueText
     : t("chat.modelControls.defaultWithLevel", { level: defaultLevelLabel });
   const triggerLabel = showReasoning ? reasoningValueText : t("chat.modelControls.fastMode");
-  const triggerTitle = params.fastMode.active
-    ? `${triggerLabel} · ${t("chat.modelControls.fastMode")}`
-    : triggerLabel;
+  const triggerTitle = showReasoning
+    ? params.fastMode.active
+      ? `${triggerLabel} · ${t("chat.modelControls.fastMode")}`
+      : triggerLabel
+    : `${triggerLabel}: ${params.fastMode.label}`;
   const commitThinking = (value: string) => {
     void params
       .onThinkingSelect(value, params.sessionKey)
@@ -120,25 +135,15 @@ export function renderChatEffortPicker(params: ChatEffortPickerParams) {
   const onlyStopSelected = selection.kind === "anchored" && selection.index === 0;
   return html`
     <details
-      class="chat-controls__inline-select chat-controls__effort-picker"
+      class="chat-controls__inline-select chat-controls__effort-picker ${params.reserved
+        ? "chat-controls__effort-picker--reserved"
+        : ""}"
+      aria-hidden=${String(params.reserved === true)}
+      ?inert=${params.reserved === true}
       @toggle=${(event: Event) => {
         const details = event.currentTarget as HTMLDetailsElement;
         handleChatComposerDetailsToggle(event);
         syncChatPickerOverlay(details);
-        if (!details.open) {
-          return;
-        }
-        if (!details.hasAttribute("data-chat-focus-panel")) {
-          return;
-        }
-        details.removeAttribute("data-chat-focus-panel");
-        queueMicrotask(() => {
-          details
-            .querySelector<HTMLElement>(
-              "[data-chat-thinking-slider]:not(:disabled), [data-chat-thinking-option]:not(:disabled), [data-chat-speed-toggle]:not(:disabled)",
-            )
-            ?.focus({ preventScroll: true });
-        });
       }}
     >
       <summary
@@ -150,7 +155,9 @@ export function renderChatEffortPicker(params: ChatEffortPickerParams) {
         data-chat-thinking-value=${selectedThinkingValue}
         data-chat-thinking-disabled=${params.thinkingDisabled ? "true" : "false"}
         data-chat-fast-mode=${params.fastMode.active ? "true" : "false"}
-        aria-label=${`${t("chat.selectors.thinkingLevel")}: ${triggerTitle}`}
+        aria-label=${showReasoning
+          ? `${t("chat.selectors.thinkingLevel")}: ${triggerTitle}`
+          : triggerTitle}
         aria-disabled=${params.disabled ? "true" : "false"}
         title=${params.disabledReason ?? triggerTitle}
         @click=${(event: MouseEvent) => {
@@ -162,6 +169,29 @@ export function renderChatEffortPicker(params: ChatEffortPickerParams) {
         ${params.fastMode.active
           ? html`<span class="chat-controls__effort-zap" aria-hidden="true">${icons.zap}</span>`
           : nothing}
+        ${showReasoning
+          ? html`
+              <span
+                class="chat-controls__effort-gauge ${effortIsOff
+                  ? "chat-controls__effort-gauge--off"
+                  : ""}"
+                aria-hidden="true"
+              >
+                ${strokeIcon(svg`
+                  <path class="chat-controls__effort-gauge-dial" d="M3.34 17a10 10 0 1 1 17.32 0" />
+                  <path
+                    class="chat-controls__effort-gauge-needle"
+                    d="M12 12V6"
+                    style=${`transform: rotate(${effortAngle}deg)`}
+                  />
+                  <circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" />
+                `)}
+                ${params.fastMode.active
+                  ? html`<span class="chat-controls__effort-fast-badge">${icons.zap}</span>`
+                  : nothing}
+              </span>
+            `
+          : html`<span class="chat-controls__effort-speed" aria-hidden="true">${icons.zap}</span>`}
         <span class="chat-controls__inline-select-label">${triggerLabel}</span>
         <span class="chat-controls__inline-select-chevron" aria-hidden="true"
           >${icons.chevronUp}</span
@@ -170,7 +200,9 @@ export function renderChatEffortPicker(params: ChatEffortPickerParams) {
       <wa-popup data-anchored-overlay>
         <div
           class="chat-controls__inline-select-menu chat-controls__effort-menu"
-          aria-label=${t("chat.modelControls.effort")}
+          aria-label=${t(
+            showReasoning ? "chat.modelControls.effort" : "chat.modelControls.fastMode",
+          )}
         >
           ${showReasoning
             ? html`

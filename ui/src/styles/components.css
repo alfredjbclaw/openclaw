@@ -164,8 +164,8 @@ openclaw-session-owner-chip {
   position: absolute;
   inset: -2px;
   box-sizing: border-box;
-  border: 1.5px solid color-mix(in srgb, var(--run) 28%, transparent);
-  border-top-color: var(--run);
+  border: 1.5px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
   border-radius: var(--radius-full);
   pointer-events: none;
 }
@@ -892,10 +892,12 @@ openclaw-session-progress-hovercard-provider {
   --session-hovercard-shift-y: 0;
 
   position: fixed;
+  inset: auto;
   z-index: 1990;
   width: min(296px, calc(100vw - 24px));
   max-height: min(520px, calc(100vh - 24px));
   padding: 0;
+  margin: 0;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -958,8 +960,166 @@ openclaw-session-progress-hovercard-provider {
   }
 }
 
+/* Explicit details remain interactive on touch devices as well as hover pointers. */
+.person-activity-hovercard[data-open="true"] {
+  pointer-events: auto;
+}
+
+.person-activity-card {
+  font-size: calc(12px * var(--control-ui-text-scale));
+  line-height: 1.5;
+}
+
+.person-activity-card__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 16px 12px;
+}
+
+.person-activity-card__header > div {
+  min-width: 0;
+}
+
+.person-activity-card h2,
+.person-activity-card h3,
+.person-activity-card p {
+  margin: 0;
+}
+
+.person-activity-card h2 {
+  overflow-wrap: anywhere;
+  font-size: calc(14px * var(--control-ui-text-scale));
+  font-weight: 600;
+}
+
+.person-activity-card__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+}
+
+.person-activity-card__status > span {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--ok);
+}
+
+.person-activity-card__facts {
+  display: grid;
+  gap: 12px;
+  padding: 0 16px 16px;
+  margin: 0;
+}
+
+.person-activity-card__facts > div {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.person-activity-card__facts dt,
+.person-activity-card__muted,
+.person-activity-card small {
+  color: var(--muted);
+}
+
+.person-activity-card__facts dd {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.person-activity-card small {
+  display: block;
+  font-size: calc(11px * var(--control-ui-text-scale));
+}
+
+.person-activity-card__section,
+.person-activity-card footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.person-activity-card h3 {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: inherit;
+  font-weight: 500;
+}
+
+.person-activity-card__sessions {
+  display: grid;
+  gap: 2px;
+}
+
+.person-activity-card__session {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px;
+  margin: 0 -6px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-decoration: none;
+}
+
+.person-activity-card__session-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.person-activity-card__session-copy > span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.person-activity-card__session-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--muted);
+}
+
+.person-activity-card svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.person-activity-card footer a {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.person-activity-card a:hover {
+  background: var(--bg-hover);
+}
+
+.person-activity-card a:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (pointer: coarse) {
+  .person-activity-card a {
+    min-height: 44px;
+    align-items: center;
+  }
+}
+
 .github-link-hovercard {
   position: fixed;
+  inset: auto;
+  margin: 0;
   z-index: 1990;
   width: min(440px, calc(100vw - 24px));
   min-height: 112px;
@@ -1487,13 +1647,6 @@ select.input {
   color: var(--text);
 }
 
-:root[data-theme-mode="light"] .chat-controls .btn--icon.active {
-  border-color: var(--accent);
-  background: var(--accent-subtle);
-  color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-subtle);
-}
-
 /* Ghost stays chromeless in light mode too: without the border-color reset,
    the higher-specificity light .btn--icon override above re-adds a 1px border
    that dark mode never shows. Chrome appears on hover only. */
@@ -1532,6 +1685,7 @@ select.input {
   font-size: 13px;
   line-height: 1.5;
   position: relative;
+  user-select: text;
 }
 
 .callout--dismissible,
@@ -2009,12 +2163,14 @@ openclaw-chat-session-rail {
   padding: 12px 14px 16px;
   overflow-y: auto;
   border-top: 1px solid var(--border);
+  user-select: text;
   overscroll-behavior-y: contain;
 }
 
-/* No digest means no digest block, so the thread would otherwise stack its own
-   border directly under the header's and open with a hanging 12px gap. */
-.chat-session-rail__header + .chat-session-rail__thread {
+/* No digest or embedded header means the thread would otherwise open with a
+   hanging divider and 12px gap. */
+.chat-session-rail__header + .chat-session-rail__thread,
+.chat-session-rail--embedded > .chat-session-rail__thread {
   margin-top: 0;
   border-top: 0;
 }
@@ -2121,16 +2277,6 @@ openclaw-chat-session-rail {
   50% {
     opacity: 0.45;
   }
-}
-
-.chat-session-rail__composer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  padding: 10px 10px 11px 14px;
-  border-top: 1px solid var(--border);
-  background: color-mix(in srgb, var(--secondary) 40%, transparent);
 }
 
 .chat-session-rail__prompt {
@@ -2938,282 +3084,6 @@ td.data-table-key-col {
 
 .shell--chat .chat {
   flex: 1;
-}
-
-/* Chat queue: compact pending rows aligned with the composer shell width. */
-.chat-queue {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: calc(100% - 36px);
-  max-width: 48rem;
-  margin: 8px auto 0;
-}
-
-.chat-queue__item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px 8px;
-  min-height: 30px;
-  padding: 3px 5px 3px 10px;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--text) 5%, transparent);
-  color: var(--muted);
-}
-
-/* The edited row keeps its slot so the operator can see where the corrected
-   message lands; the outline says the composer owns it right now.
-   Editing is an active state, not a failure, so it uses the informational
-   family: --accent is red in every shipped theme and sits on top of --danger
-   (see the --run token note in base.css), which reads as an error at a glance. */
-.chat-queue__item--editing {
-  background: var(--info-subtle);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--info) 34%, transparent);
-}
-
-/* Drop target reads as an insertion edge rather than a selected row, so the
-   dragged message clearly lands at this position. */
-.chat-queue__item--drop-target {
-  box-shadow: inset 0 2px 0 0 var(--accent);
-}
-
-/* The handle owns reordering for both input methods: drag it, or focus it and
-   press the arrow keys. It stays a real button so keyboards can reach it. */
-.chat-queue__grip {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-  width: 12px;
-  height: 16px;
-  margin-left: -5px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: color-mix(in srgb, var(--muted) 55%, transparent);
-  cursor: grab;
-}
-
-.chat-queue__item:hover .chat-queue__grip:not(:disabled),
-.chat-queue__grip:focus-visible {
-  color: var(--muted);
-}
-
-.chat-queue__grip:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-/* Still occupies the handle column so every row's pill and text share one x,
-   and stays visible but dimmer than a live handle: this row is holding its
-   place, not offering a drag. Hover leaves it alone for the same reason. */
-.chat-queue__grip:disabled {
-  color: color-mix(in srgb, var(--muted) 34%, transparent);
-  cursor: default;
-}
-
-.chat-queue__grip svg {
-  width: 12px;
-  height: 14px;
-}
-
-.chat-queue__item--failed {
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
-}
-
-.chat-queue__icon {
-  display: inline-flex;
-  flex-shrink: 0;
-  width: 14px;
-  height: 14px;
-  color: var(--muted);
-}
-
-.chat-queue__icon svg {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.75px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.chat-queue__item--failed .chat-queue__icon {
-  color: var(--danger);
-}
-
-/* Reconnect rows mirror the connection pill's amber status dot so the queue
-   reads as quiet auto-retry status, not a failure needing action. */
-.chat-queue__dot {
-  flex-shrink: 0;
-  width: 7px;
-  height: 7px;
-  margin: 0 3.5px;
-  border-radius: var(--radius-full);
-  background: var(--warn);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--warn) 55%, transparent);
-  animation: pulse-subtle 2s ease-in-out infinite;
-}
-
-.chat-queue__item--reconnect .chat-queue__badge {
-  background: color-mix(in srgb, var(--warn) 14%, transparent);
-  color: color-mix(in srgb, var(--warn) 78%, var(--text-strong));
-}
-
-.chat-queue__badge {
-  flex-shrink: 0;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text) 12%, transparent);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-
-.chat-queue__item--failed .chat-queue__badge {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
-}
-
-/* Last of the state badges on purpose: editing outranks the send state it
-   pauses, so a reconnecting or failed row still reads as informational blue. */
-.chat-queue__item--editing .chat-queue__badge {
-  background: color-mix(in srgb, var(--info) 16%, transparent);
-  color: var(--info);
-}
-
-.chat-queue__text {
-  flex: 1 1 0;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--chat-text);
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.chat-queue__edit-input {
-  flex: 1 1 0;
-  min-width: 0;
-  min-height: 26px;
-  margin: -1px 0;
-  padding: 4px 6px;
-  border: 1px solid color-mix(in srgb, var(--info) 42%, transparent);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  color: var(--chat-text);
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.4;
-  resize: vertical;
-}
-
-.chat-queue__edit-input:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-/* Wraps onto its own flex line below the row (see renderChatQueueItem). */
-.chat-queue__error {
-  flex-basis: 100%;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 0 0 3px 22px;
-  color: var(--danger);
-  font-size: 11.5px;
-  line-height: 1.35;
-}
-
-.chat-queue__actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-
-.chat-queue__action {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--accent);
-  font-size: 11.5px;
-  font-weight: 600;
-  line-height: 1;
-  cursor: var(--cursor-action);
-}
-
-.chat-queue__action svg {
-  width: 12px;
-  height: 12px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.75px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.chat-queue__action:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.chat-queue__edit,
-.chat-queue__remove,
-.chat-queue__edit-submit,
-.chat-queue__edit-cancel {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--muted);
-  cursor: var(--cursor-action);
-}
-
-/* Inert instead of removed: an open edit keeps every action slot in place so the
-   rows below it never shift while the operator retypes. */
-.chat-queue__edit:disabled,
-.chat-queue__remove:disabled,
-.chat-queue__edit-submit:disabled,
-.chat-queue__edit-cancel:disabled {
-  color: color-mix(in srgb, var(--muted) 34%, transparent);
-  cursor: default;
-}
-
-.chat-queue__edit:hover:not(:disabled),
-.chat-queue__remove:hover:not(:disabled),
-.chat-queue__edit-submit:hover:not(:disabled),
-.chat-queue__edit-cancel:hover:not(:disabled) {
-  color: var(--text);
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-}
-
-.chat-queue__edit svg,
-.chat-queue__remove svg,
-.chat-queue__edit-submit svg,
-.chat-queue__edit-cancel svg {
-  width: 13px;
-  height: 13px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2px;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 /* Chat lines */
@@ -5092,7 +4962,6 @@ td.data-table-key-col {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
-  animation: scale-in 0.15s ease-out;
 }
 
 .cmd-palette__label {
@@ -5927,8 +5796,8 @@ td.data-table-key-col {
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
-  border: 1.5px solid color-mix(in srgb, var(--run) 28%, transparent);
-  border-top-color: var(--run);
+  border: 1.5px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-top-color: var(--accent);
   border-radius: var(--radius-full);
 }
 
@@ -5947,7 +5816,7 @@ td.data-table-key-col {
   .session-run-spinner,
   .session-glyph__ring {
     animation: none;
-    border-color: var(--run);
+    border-color: var(--accent);
   }
 }
 

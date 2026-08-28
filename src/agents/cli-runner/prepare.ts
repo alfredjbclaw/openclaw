@@ -69,6 +69,7 @@ import {
 import type { AuthProfileCredential, AuthProfileStore } from "../auth-profiles/types.js";
 import {
   buildBootstrapBudgetState,
+  buildBootstrapPromptWarningNotice,
   buildBootstrapTruncationReportMeta,
 } from "../bootstrap-budget.js";
 import {
@@ -989,6 +990,7 @@ async function prepareCliRunContextWithinReadFence(
     seenSignatures: params.bootstrapPromptWarningSignaturesSeen,
     previousSignature: params.bootstrapPromptWarningSignature,
   });
+  const bootstrapTruncationNotice = buildBootstrapPromptWarningNotice(bootstrapPromptWarning.lines);
   // Ring-zero OpenClaw runs replace the bundle MCP surface entirely: no
   // loopback server, no plugin/user servers. A selectable backend also removes
   // its native tools, leaving only this openclaw stdio server.
@@ -1180,12 +1182,19 @@ async function prepareCliRunContextWithinReadFence(
         ]),
       )
     : baseExtraSystemPromptHash;
-  // Bootstrap guidance changes resumable system context. Hash the pending mode
-  // so entering or leaving bootstrap refreshes first-only CLI system prompts.
+  // Bootstrap guidance and truncation notices change resumable system context.
+  // Hash both so entering or leaving either state refreshes first-only CLI
+  // system prompts.
   const extraSystemPromptHash =
-    bootstrapMode === "none"
+    bootstrapMode === "none" && bootstrapTruncationNotice === undefined
       ? toolBoundExtraSystemPromptHash
-      : hashCliSessionText(JSON.stringify([toolBoundExtraSystemPromptHash ?? null, bootstrapMode]));
+      : hashCliSessionText(
+          JSON.stringify([
+            toolBoundExtraSystemPromptHash ?? null,
+            bootstrapMode,
+            bootstrapTruncationNotice !== undefined,
+          ]),
+        );
   let cleanupPreparedResources: (() => Promise<void>) | undefined;
   let preparedExecution: PrivateCliBackendPreparedExecution | undefined;
   try {
@@ -1642,6 +1651,7 @@ async function prepareCliRunContextWithinReadFence(
             tools: promptTools,
             contextFiles,
             bootstrapMode,
+            bootstrapTruncationNotice,
             modelDisplay,
             agentId: sessionAgentId,
             sessionKey: params.sessionKey,
@@ -1869,7 +1879,6 @@ async function prepareCliRunContextWithinReadFence(
         systemPrompt,
         systemPromptReport,
         claudeSkillsPluginArgs: claudeSkillsPlugin.args,
-        bootstrapPromptWarningLines: bootstrapPromptWarning.lines,
         authEpoch,
         authBindingFingerprint,
         ...(skipLocalCredentialEpoch ? { authBindingSkipsLocalCredential: true } : {}),
@@ -1980,7 +1989,6 @@ async function prepareCliRunContextWithinReadFence(
       systemPrompt,
       systemPromptReport,
       claudeSkillsPluginArgs: claudeSkillsPlugin.args,
-      bootstrapPromptWarningLines: bootstrapPromptWarning.lines,
       ...(openClawHistoryPrompt ? { openClawHistoryPrompt } : {}),
       authEpoch,
       authBindingFingerprint,

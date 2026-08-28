@@ -294,10 +294,10 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
       {
         name: "GitHub-hosted",
         pullRequest: githubPullRequestCompact,
-        pullRequestJobs: 80,
+        pullRequestJobs: 81,
         pullRequestMax: 186,
         push: githubCompact,
-        pushJobs: 71,
+        pushJobs: 72,
         pushMax: 149,
       },
       {
@@ -855,6 +855,28 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
       .map((shard) => shard.shardName);
 
     expect(requiresDistShardNames).toEqual(["core-support-boundary", "core-runtime-tui-pty"]);
+  });
+
+  it("preserves runtime preparation and core-only ownership in full and compact plans", () => {
+    const qaConfig = "test/vitest/vitest.extension-qa.config.ts";
+    const runtimeTarget = "test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts";
+    for (const shards of [
+      createNodeTestShards(),
+      createNodeTestShardBundles({ compact: true, compactMode: "pull-request" }),
+    ]) {
+      expect(
+        shards.flatMap((shard) =>
+          "configs" in shard ? shard.configs : shard.groups.flatMap((group) => group.configs),
+        ),
+      ).not.toContain(qaConfig);
+      expect(
+        shards.find((shard) =>
+          ("configs" in shard ? [shard] : shard.groups).some((group) =>
+            group.includePatterns?.includes(runtimeTarget),
+          ),
+        )?.pretestBuildMode,
+      ).toBe("runtime");
+    }
   });
 
   it("splits tooling checks independently from built artifacts", () => {
@@ -1675,6 +1697,24 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         shardName: "auto-reply-reply-dispatch",
       },
       {
+        checkName: "checks-node-auto-reply-reply-dispatch-core",
+        configs: ["test/vitest/vitest.auto-reply-reply.config.ts"],
+        requiresDist: false,
+        shardName: "auto-reply-reply-dispatch-core",
+      },
+      {
+        checkName: "checks-node-auto-reply-reply-dispatch-delivery",
+        configs: ["test/vitest/vitest.auto-reply-reply.config.ts"],
+        requiresDist: false,
+        shardName: "auto-reply-reply-dispatch-delivery",
+      },
+      {
+        checkName: "checks-node-auto-reply-reply-dispatch-lifecycle",
+        configs: ["test/vitest/vitest.auto-reply-reply.config.ts"],
+        requiresDist: false,
+        shardName: "auto-reply-reply-dispatch-lifecycle",
+      },
+      {
         checkName: "checks-node-auto-reply-reply-session",
         configs: ["test/vitest/vitest.auto-reply-reply.config.ts"],
         requiresDist: false,
@@ -1697,5 +1737,26 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
 
     expect(actual).toEqual(listTestFiles("src/auto-reply/reply"));
     expect(new Set(actual).size).toBe(actual.length);
+  });
+
+  it("keeps each dispatch entrypoint in its own dedicated shard", () => {
+    const dispatchEntrypoints = new Map([
+      ["auto-reply-reply-dispatch-core", "src/auto-reply/reply/dispatch-from-config.test.ts"],
+      [
+        "auto-reply-reply-dispatch-delivery",
+        "src/auto-reply/reply/dispatch-from-config.delivery.test.ts",
+      ],
+      [
+        "auto-reply-reply-dispatch-lifecycle",
+        "src/auto-reply/reply/dispatch-from-config.lifecycle.test.ts",
+      ],
+    ]);
+    const shards = createNodeTestShards();
+
+    for (const [shardName, entrypoint] of dispatchEntrypoints) {
+      expect(shards.find((shard) => shard.shardName === shardName)?.includePatterns).toEqual([
+        entrypoint,
+      ]);
+    }
   });
 });

@@ -374,11 +374,15 @@ class SidebarAttention extends OpenClawLightDomElement {
     if (!this.dismissedScope || !this.context) {
       return;
     }
+    const snapshot = this.context.gateway.snapshot;
+    const scopes = snapshot.hello?.auth?.scopes;
     const entry = buildScopeUpgradeInboxEntry({
-      scopes: this.context.gateway.snapshot.hello?.auth?.scopes,
+      scopes,
       state: this.context.scopeUpgrade.state,
     });
-    if (!entry?.dismissal) {
+    // A disconnect makes access unresolved, not resolved. Keep the snooze until
+    // connected scope facts or an active request lifecycle authoritatively retire it.
+    if (snapshot.phase === "connected" && scopes !== undefined && !entry?.dismissal) {
       this.dismissed = clearSidebarAttentionDismissal(this.dismissedScope, "scopeUpgrade");
     }
   }
@@ -496,6 +500,12 @@ class SidebarAttention extends OpenClawLightDomElement {
     if (restoreFocus) {
       void this.updateComplete.then(() => trigger?.focus());
     }
+  }
+
+  dismissPanel(): boolean {
+    const wasOpen = this.panelOpen;
+    this.closePanel(false);
+    return wasOpen;
   }
 
   private readonly syncOverflowCue = () => {

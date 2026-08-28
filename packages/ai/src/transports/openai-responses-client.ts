@@ -43,6 +43,7 @@ import {
   summarizeResponsesPayload,
 } from "./openai-responses-debug.js";
 import {
+  buildOpenAIResponsesCompactSystemMessage,
   buildOpenAIResponsesParams,
   sanitizeOpenAICodexResponsesParams,
 } from "./openai-responses-params-internal.js";
@@ -70,7 +71,11 @@ import {
   isOpenAICodexResponsesModel,
   resolveCodeModeResponsesVisibleToolNames,
 } from "./openai-transport-params.js";
-import { createOpenAIProviderAcceptanceHook, log } from "./openai-transport-shared.js";
+import {
+  createOpenAIProviderAcceptanceHook,
+  log,
+  resolveOpenAIClientBaseUrl,
+} from "./openai-transport-shared.js";
 import { sanitizeResponsesImagePayload } from "./responses-image-payload-sanitizer.js";
 import {
   createWritableTransportEventStream,
@@ -157,7 +162,7 @@ export function createOpenAIResponsesClient(
 ) {
   return new OpenAI({
     apiKey,
-    baseURL: model.baseUrl,
+    baseURL: resolveOpenAIClientBaseUrl(model),
     dangerouslyAllowBrowser: true,
     defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders, sessionId),
     fetch: buildGuardedModelFetch(model),
@@ -171,12 +176,19 @@ async function postOpenAIResponsesCompaction(params: {
   request: ReturnType<typeof buildOpenAIResponsesParams>;
   options: OpenAIResponsesOptions | undefined;
 }): Promise<OpenAIResponsesCompactEndpointResult> {
+  const compactInput =
+    typeof params.request.instructions === "string" && params.request.instructions.length > 0
+      ? [
+          buildOpenAIResponsesCompactSystemMessage(params.model, params.request.instructions),
+          ...(params.request.input ?? []),
+        ]
+      : params.request.input;
   const response = await params.client.post<unknown>("/responses/compact", {
     ...buildOpenAISdkRequestOptions(params.model, params.options?.signal, {
       timeoutMs: params.options?.timeoutMs,
       maxRetries: params.options?.maxRetries,
     }),
-    body: { model: params.request.model, input: params.request.input },
+    body: { model: params.request.model, input: compactInput },
   });
   const output = isRecord(response) && Array.isArray(response.output) ? response.output : [];
   const item = output.at(-1);

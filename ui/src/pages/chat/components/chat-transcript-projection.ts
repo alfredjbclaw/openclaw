@@ -53,14 +53,15 @@ import {
   type ChatThreadProps,
 } from "./chat-thread-interactions.ts";
 import { latestTranscriptAnnouncement } from "./chat-transcript-announcement.ts";
-import type { ChatTranscriptSession, TranscriptRow } from "./chat-transcript-controller.ts";
+import type { ChatTranscriptSession } from "./chat-transcript-controller.ts";
+import type { TranscriptRow } from "./chat-transcript-layout.ts";
 import {
   guardChatRenderItems,
   trackTranscriptRenderDependencies,
 } from "./chat-transcript-render-guard.ts";
 import { renderChatTypingIndicator } from "./chat-typing-indicator.ts";
 import { resolveAssistantDisplayAvatar } from "./chat-welcome.ts";
-import { renderTurnRecapRow, renderTurnTerminalStatusRow } from "./chat-working-indicator.ts";
+import { renderTurnRecapRow } from "./chat-working-indicator.ts";
 
 type ChatTranscriptProjection = {
   isDirectThread: boolean;
@@ -304,11 +305,12 @@ export function projectChatTranscript(
     onRequestUpdate: requestUpdate,
     resourceBasePath: props.resourceBasePath,
     localMediaPreviewRoots: props.localMediaPreviewRoots ?? [],
+    connectionEpoch: props.connectionEpoch,
     assistantAttachmentAuthToken: props.assistantAttachmentAuthToken ?? null,
     resolveArtifactDownload: props.resolveArtifactDownload,
-    onAssistantAttachmentLoaded: props.onAssistantAttachmentLoaded,
     onRequestOpenImage: props.onRequestOpenImage,
     onOpenImage: props.onOpenImage,
+    onAssistantAttachmentLoaded: props.onAssistantAttachmentLoaded,
     canvasPluginSurfaceUrl: props.canvasPluginSurfaceUrl,
     embedSandboxMode: props.embedSandboxMode ?? "scripts",
     allowExternalEmbedUrls: props.allowExternalEmbedUrls ?? false,
@@ -426,7 +428,7 @@ export function projectChatTranscript(
       return renderStreamGroup(item.parts, {
         ...streamGroupOptions,
         questionPrompts,
-        startupPhase: props.startupStatus?.phase,
+        startupLabel: props.startupLabel,
         waitingApproval: props.waitingApproval,
         runOutputTokens: props.runOutputTokens,
       });
@@ -457,7 +459,7 @@ export function projectChatTranscript(
         streamOptions: {
           ...streamGroupOptions,
           questionPrompts,
-          startupPhase: props.startupStatus?.phase,
+          startupLabel: props.startupLabel,
           waitingApproval: props.waitingApproval,
           runOutputTokens: props.runOutputTokens,
         },
@@ -527,7 +529,7 @@ export function projectChatTranscript(
       parts: activeStatusParts,
       options: {
         ...streamGroupOptions,
-        startupPhase: props.startupStatus?.phase,
+        startupLabel: props.startupLabel,
         waitingApproval: props.waitingApproval,
         runOutputTokens: props.runOutputTokens,
       },
@@ -592,13 +594,6 @@ export function projectChatTranscript(
       }
     }
   }
-  if (props.runStatus?.phase === "interrupted") {
-    transcriptRows.push({
-      kind: "content",
-      key: `interrupted:${props.runStatus.occurredAt}`,
-      content: renderTurnTerminalStatusRow("interrupted"),
-    });
-  }
   const realtimeConversation = renderRealtimeTalkConversation(props);
   if (realtimeConversation !== nothing) {
     transcriptRows.push({
@@ -652,7 +647,7 @@ export function projectChatTranscript(
     props.showToolCalls,
     Boolean(props.runActive),
     Boolean(props.runWorking),
-    props.startupStatus?.phase,
+    props.startupLabel,
     Boolean(props.waitingApproval),
     props.questionPrompts,
     Boolean(props.autoExpandToolCalls),

@@ -18,6 +18,7 @@ import {
   scrubDreamingNarrativeArtifacts,
 } from "./dreaming-session-cleanup.js";
 import { extractAssistantText } from "./dreaming-shared.js";
+import { readStore } from "./short-term-promotion-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -64,6 +65,8 @@ export type NarrativePhaseData = {
   promotions?: string[];
   currentDate?: string;
   recentDiaryEntries?: string[];
+  /** Tracked inputs that must still exist when generated text is published. */
+  sourceEntryKeys?: readonly string[];
 };
 
 type Logger = {
@@ -268,11 +271,7 @@ async function startNarrativeRunOrFallback(params: {
       throw runErr;
     }
     await appendFallbackNarrativeEntry({
-      workspaceDir: params.workspaceDir,
-      data: params.data,
-      nowMs: params.nowMs,
-      timezone: params.timezone,
-      logger: params.logger,
+      ...params,
       reason: "subagent runtime is request-scoped",
     });
     return null;
@@ -517,6 +516,18 @@ function isOptionalDiaryContextReadError(err: unknown): boolean {
   return err instanceof Error && err.message === "path must be a regular file";
 }
 
+function getDiaryContextEntries(existing: string): string[] {
+  const startIdx = existing.indexOf(DIARY_START_MARKER);
+  const endIdx = existing.indexOf(DIARY_END_MARKER);
+  if (startIdx < 0 || endIdx < 0 || endIdx < startIdx) {
+    return [];
+  }
+  const inner = existing.slice(startIdx + DIARY_START_MARKER.length, endIdx);
+  return splitDiaryBlocks(inner)
+    .map(normalizeDiaryBlockBody)
+    .filter((entry) => entry.length > 0);
+}
+
 export async function readRecentDreamDiaryEntries(params: {
   workspaceDir: string;
   limit?: number;
@@ -535,17 +546,7 @@ export async function readRecentDreamDiaryEntries(params: {
     }
     throw err;
   }
-  const startIdx = existing.indexOf(DIARY_START_MARKER);
-  const endIdx = existing.indexOf(DIARY_END_MARKER);
-  if (startIdx < 0 || endIdx < 0 || endIdx < startIdx) {
-    return [];
-  }
-  const inner = existing.slice(startIdx + DIARY_START_MARKER.length, endIdx);
-  return splitDiaryBlocks(inner)
-    .map(normalizeDiaryBlockBody)
-    .filter((entry) => entry.length > 0)
-    .slice(-limit)
-    .toReversed();
+  return getDiaryContextEntries(existing).slice(-limit).toReversed();
 }
 
 function normalizeDiaryBlockFingerprint(block: string): string {
@@ -780,12 +781,28 @@ async function appendNarrativeEntry(params: {
   narrative: string;
   nowMs: number;
   timezone?: string;
-}): Promise<string> {
+  sourceEntryKeys?: readonly string[];
+  recentDiaryEntries?: readonly string[];
+}): Promise<string | undefined> {
   const dateStr = formatNarrativeDate(params.nowMs, params.timezone);
   const entry = buildDiaryEntry(params.narrative, dateStr);
-  return await updateDreamsFile({
+  return await updateDreamsFile<string | undefined>({
     workspaceDir: params.workspaceDir,
-    updater: (existing, dreamsPath) => {
+    updater: async (existing, dreamsPath) => {
+      const sourceKeys = params.sourceEntryKeys ?? [];
+      const currentSources =
+        sourceKeys.length > 0
+          ? (await readStore(params.workspaceDir, new Date(params.nowMs).toISOString())).entries
+          : undefined;
+      const currentDiary = new Set(getDiaryContextEntries(existing));
+      // The updater holds the purge lock. Model work ran outside it, so both
+      // staged inputs and prior diary quotes must survive until this commit.
+      if (
+        sourceKeys.some((key) => !currentSources?.[key]) ||
+        params.recentDiaryEntries?.some((block) => !currentDiary.has(clampDiaryContextEntry(block)))
+      ) {
+        return { content: existing, result: undefined, shouldWrite: false };
+      }
       let updated: string;
       if (existing.includes(DIARY_START_MARKER) && existing.includes(DIARY_END_MARKER)) {
         const endIdx = existing.lastIndexOf(DIARY_END_MARKER);
@@ -844,6 +861,7 @@ async function generateAndAppendDreamNarrative(
   });
   const message = buildNarrativePrompt(params.data);
   let cleanupFailure: string | undefined;
+  let outcome: DreamNarrativeOutcome = { status: "completed" };
   await withNarrativeSessionLock(sessionKey, async () => {
     const attempts: Array<{ sessionKey: string; runId: string | null }> = [];
     let successfulSessionKey: string | null = null;
@@ -871,16 +889,12 @@ async function generateAndAppendDreamNarrative(
           }
 
           const runId = await startNarrativeRunOrFallback({
-            subagent: params.subagent,
+            ...params,
             sessionKey: attemptSessionKey,
             runKey: attemptRunKey,
             message,
-            data: params.data,
-            workspaceDir: params.workspaceDir,
             nowMs,
-            timezone: params.timezone,
             model: attemptModel,
-            logger: params.logger,
           });
           if (!runId) {
             return;
@@ -919,11 +933,8 @@ async function generateAndAppendDreamNarrative(
             })} for ${params.data.phase} phase; writing fallback diary entry.`,
           );
           await appendFallbackNarrativeEntry({
-            workspaceDir: params.workspaceDir,
-            data: params.data,
+            ...params,
             nowMs,
-            timezone: params.timezone,
-            logger: params.logger,
             reason: `the narrative run ended with ${formatNarrativeTerminalStatus({
               status: result.status,
               error: result.error,
@@ -964,22 +975,28 @@ async function generateAndAppendDreamNarrative(
           `memory-core: narrative generation produced no text for ${params.data.phase} phase; writing fallback diary entry.`,
         );
         await appendFallbackNarrativeEntry({
-          workspaceDir: params.workspaceDir,
-          data: params.data,
+          ...params,
           nowMs,
-          timezone: params.timezone,
-          logger: params.logger,
           reason: "the narrative run produced no text",
         });
         return;
       }
 
-      await appendNarrativeEntry({
+      const dreamsPath = await appendNarrativeEntry({
         workspaceDir: params.workspaceDir,
         narrative,
         nowMs,
         timezone: params.timezone,
+        sourceEntryKeys: params.data.sourceEntryKeys,
+        recentDiaryEntries: params.data.recentDiaryEntries,
       });
+      if (dreamsPath === undefined) {
+        outcome = { status: "skipped" };
+        params.logger.info(
+          `memory-core: narrative publication skipped for ${params.data.phase} phase because source memory or diary context changed.`,
+        );
+        return;
+      }
 
       params.logger.info(
         `memory-core: dream diary entry written for ${params.data.phase} phase [workspace=${params.workspaceDir}].`,
@@ -992,11 +1009,8 @@ async function generateAndAppendDreamNarrative(
         `memory-core: narrative generation failed for ${params.data.phase} phase: ${formatErrorMessage(err)}`,
       );
       await appendFallbackNarrativeEntry({
-        workspaceDir: params.workspaceDir,
-        data: params.data,
+        ...params,
         nowMs,
-        timezone: params.timezone,
-        logger: params.logger,
         reason: `the narrative run failed (${formatErrorMessage(err)})`,
       });
     } finally {
@@ -1030,7 +1044,7 @@ async function generateAndAppendDreamNarrative(
       });
     }
   });
-  return cleanupFailure ? { status: "degraded", error: cleanupFailure } : { status: "completed" };
+  return cleanupFailure ? { status: "degraded", error: cleanupFailure } : outcome;
 }
 
 // ── Detached narrative concurrency limit ───────────────────────────────

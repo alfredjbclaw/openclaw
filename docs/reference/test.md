@@ -79,6 +79,12 @@ reconcile dependencies before the remote wrapper starts.
 
 ## Core commands
 
+Maintained JavaScript tooling wrappers and root package commands use tsx's
+in-process transform cache. They skip its shared disk cache before the loader
+starts, and child tooling inherits that policy. This does not relocate or clean
+temporary directories, Node or Vitest caches, or other global caches. Raw external
+`tsx` and `node --import tsx` invocations outside these launchers are unchanged.
+
 Test wrapper runs end with a short `[test] passed|failed|skipped ... in ...` summary; Vitest's own duration line stays the per-shard detail.
 
 | Command                                           | What it does                                                                                                                                                                                                                                                                                                                                          |
@@ -91,6 +97,29 @@ Test wrapper runs end with a short `[test] passed|failed|skipped ... in ...` sum
 | `pnpm test:coverage:changed`                      | Unit coverage only for files changed since `origin/main`.                                                                                                                                                                                                                                                                                             |
 | `pnpm changed:lanes`                              | Shows the architectural lanes triggered by the diff against `origin/main`.                                                                                                                                                                                                                                                                            |
 | `pnpm check:changed`                              | Classifies and runs the local changed formatting/typecheck/lint/guard plan. Does not run Vitest; use `pnpm test:changed` or `pnpm test <target>` for test proof.                                                                                                                                                                                      |
+
+## Linux shell integrations
+
+The Mantis Telegram lease-fence integration tests require Linux, Bash,
+util-linux `setsid`, and coreutils (`sleep`, `cat`, and `true`). On Ubuntu,
+install the prerequisites with `sudo apt-get install bash util-linux coreutils`.
+With repository dependencies ready, run the focused proof on Linux:
+
+```bash
+node scripts/run-vitest.mjs test/scripts/run-with-lease-fence.test.ts
+```
+
+All three tests must pass: lease loss removes the command's process group,
+clean exit propagates, and stdin reaches the fenced command. Missing `setsid`
+fails the Linux suite with prerequisite guidance; it does not skip the tests.
+macOS and Windows skip this Linux workflow integration. Use Linux CI or an
+isolated Linux environment for that proof. See [Mantis](/concepts/mantis).
+
+Remote filesystem fixtures that execute GNU `stat` and `readlink` run locally
+only on Linux. The shared leading-`@` file-tool scenario
+also runs against a portable remote-only bridge on every platform. Native
+Python helper coverage remains separate, including macOS; these fixture gates
+do not restrict the [SSH backend's Gateway host](/gateway/sandboxing#ssh-backend).
 
 ## Shared test state and process helpers
 
@@ -168,14 +197,14 @@ Other behavior: the runner preflights Docker by default, cleans stale OpenClaw E
 
 ### Sandbox compatibility lanes
 
-| Command                                      | Verifies                                                                                                                                                                                                         |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm test:e2e:openshell`                    | Real OpenShell gateway, isolated control-plane workspace, custom image, remote and mirrored filesystems, nested mirror writes, protected host metadata, sandbox lifecycle, SSH, and deny/allow network policies. |
-| `pnpm test:docker:package-install`           | Packed OpenClaw npm artifact installation into a clean global prefix, then CLI version and help startup from the installed package.                                                                              |
-| `pnpm test:docker:openai-web-search-minimal` | Mocked TLS endpoint with a private test CA, isolated Gateway startup, and web-search request handling through the configured certificate trust path.                                                             |
-| `pnpm test:docker:browser-cdp-snapshot`      | Chromium startup, raw CDP connectivity, isolated Gateway browser commands, doctor output, and accessibility snapshot roles.                                                                                      |
-| `pnpm test:docker:kitchen-sink-rpc`          | Installed plugin commands and catalog tools, read-only Gateway RPC traversal, authentication boundaries, channel lifecycle, and resource ceilings.                                                               |
-| `pnpm test:docker:kitchen-sink-plugin`       | Packaged and registry plugin install flows, plugin execution, expected unsupported-version failures, ClawHub fallback, and npm-to-ClawHub migration.                                                             |
+| Command                                      | Verifies                                                                                                                                                                                                                                                           |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pnpm test:e2e:openshell`                    | Real OpenShell gateway, isolated control-plane workspace, custom image, remote and mirrored filesystems, eight-way mixed exec/file stress, exact host/remote inventories, failure recovery, SSH cleanup, protected host metadata, and deny/allow network policies. |
+| `pnpm test:docker:package-install`           | Packed OpenClaw npm artifact installation into a clean global prefix, then CLI version and help startup from the installed package.                                                                                                                                |
+| `pnpm test:docker:openai-web-search-minimal` | Mocked TLS endpoint with a private test CA, isolated Gateway startup, and web-search request handling through the configured certificate trust path.                                                                                                               |
+| `pnpm test:docker:browser-cdp-snapshot`      | Chromium startup, raw CDP connectivity, isolated Gateway browser commands, doctor output, and accessibility snapshot roles.                                                                                                                                        |
+| `pnpm test:docker:kitchen-sink-rpc`          | Installed plugin commands and catalog tools, read-only Gateway RPC traversal, authentication boundaries, channel lifecycle, and resource ceilings.                                                                                                                 |
+| `pnpm test:docker:kitchen-sink-plugin`       | Packaged and registry plugin install flows, plugin execution, expected unsupported-version failures, ClawHub fallback, and npm-to-ClawHub migration.                                                                                                               |
 
 ## Local PR gate
 

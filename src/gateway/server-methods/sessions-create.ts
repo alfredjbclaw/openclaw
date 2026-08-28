@@ -48,6 +48,10 @@ import {
   resolveSessionCreateInitialTurn,
   shouldAttachPendingMessageSeq,
 } from "./session-create-initial-turn.js";
+import {
+  normalizeSessionProjectGitUrl,
+  validateSessionProjectPreparation,
+} from "./session-create-project.js";
 import { prepareSessionCreateFilesystemRoot } from "./session-create-root.js";
 import { resolveOperatorSessionCreation } from "./session-creation-provenance.js";
 import { sessionLog } from "./sessions-shared.js";
@@ -63,6 +67,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
     context,
     client,
     isWebchatConnect,
+    sessionMutationCommitGuard,
     sessionMutationAuthorization,
   }) => {
     if (!assertValidParams(params, validateSessionsCreateParams, "sessions.create", respond)) {
@@ -74,8 +79,9 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
     const cfg = context.getRuntimeConfig();
     const authority = createAgentRuntimeAuthorityGuard(client, context, respond);
     const commitGuard =
-      authority.commitGuard || sessionMutationAuthorization
+      authority.commitGuard || sessionMutationCommitGuard || sessionMutationAuthorization
         ? () => {
+            sessionMutationCommitGuard?.();
             authority.commitGuard?.();
             sessionMutationAuthorization?.assertCurrent();
           }
@@ -151,15 +157,17 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
     let requestedCwd = normalizeOptionalString(p.cwd);
     const requestedExecNode = normalizeOptionalString(p.execNode);
     const requestedProjectId = normalizeOptionalString(p.projectId);
-    if (requestedProjectId && (requestedCwd || requestedExecNode)) {
-      respond(
-        false,
-        undefined,
-        errorShape(
-          ErrorCodes.INVALID_REQUEST,
-          "sessions.create projectId cannot be combined with cwd or execNode",
-        ),
-      );
+    const requestedProjectGitUrl = p.projectGitUrl;
+    const projectPreparationError = validateSessionProjectPreparation({
+      cwd: requestedCwd,
+      execNode: requestedExecNode,
+      gitUrl: requestedProjectGitUrl,
+      hasInitialTurn,
+      projectId: requestedProjectId,
+      worktree: p.worktree === true,
+    });
+    if (projectPreparationError) {
+      respond(false, undefined, projectPreparationError);
       return;
     }
     // Agent tools expand `~` before RPC; the Gateway contract stays absolute-only.
@@ -517,6 +525,7 @@ export const sessionCreateHandlers: GatewayRequestHandlers = {
       contextWindow: p.contextWindow,
       thinkingLevel: p.thinkingLevel,
       projectId: requestedProjectId,
+      pendingProjectGitUrl: normalizeSessionProjectGitUrl(requestedProjectGitUrl),
       incognito: p.incognito,
       ...(client?.connect ? { requestingOperatorScopes: clientScopes } : {}),
       ...(client?.authenticatedUserProfile

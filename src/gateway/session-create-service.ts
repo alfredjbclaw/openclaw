@@ -298,6 +298,7 @@ export async function createGatewaySession(params: {
   thinkingLevel?: string;
   /** Registry identity recorded only when this request creates a logical session node. */
   projectId?: string;
+  pendingProjectGitUrl?: string;
   incognito?: boolean;
   visibility?: SessionVisibility;
   /** Trusted catalog-owned model/runtime pair, persisted and locked together. */
@@ -366,6 +367,7 @@ export async function createGatewaySession(params: {
   const requestedKey = normalizeOptionalString(params.key);
   const parentSessionKey = normalizeOptionalString(params.parentSessionKey);
   const projectId = normalizeOptionalString(params.projectId);
+  const pendingProjectGitUrl = normalizeOptionalString(params.pendingProjectGitUrl);
   const requestedToolOverrides = params.toolOverrides !== undefined;
   const explicitAgentId = params.agentId;
   const normalizedExplicitAgentId = normalizeOptionalString(explicitAgentId);
@@ -978,6 +980,15 @@ export async function createGatewaySession(params: {
             ),
           };
         }
+        if (pendingProjectGitUrl && existingEntry !== undefined) {
+          return {
+            ok: false,
+            error: errorShape(
+              ErrorCodes.INVALID_REQUEST,
+              "remote project preparation requires a new session",
+            ),
+          };
+        }
         if (spawnToolPolicy && existingEntry !== undefined) {
           return {
             ok: false,
@@ -1143,11 +1154,14 @@ export async function createGatewaySession(params: {
           ...(params.creation && createdNewEntry
             ? buildSessionCreationStamp({
                 ...params.creation,
-                sandbox: resolveCreatorSandbox(params.cfg, params.creation),
+                // Delegated isolation survives changes to the creator's current role.
+                sandbox:
+                  params.creation.sandbox ?? resolveCreatorSandbox(params.cfg, params.creation),
               })
             : {}),
           ...(params.visibility && createdNewEntry ? { visibility: params.visibility } : {}),
           ...(projectId && createdNewEntry ? { projectId } : {}),
+          ...(pendingProjectGitUrl && createdNewEntry ? { pendingProjectGitUrl } : {}),
           ...(catalogResolvedModel && catalogAgentRuntime
             ? {
                 providerOverride: catalogResolvedModel.provider,

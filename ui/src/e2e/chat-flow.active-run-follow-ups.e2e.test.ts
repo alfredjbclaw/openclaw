@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { waitForControlUiGatewayReconnecting } from "../test-helpers/control-ui-e2e-readiness.ts";
 import {
   chatSessionListResponse,
   createChatFlowE2eSuite,
@@ -93,46 +94,6 @@ suite.define(() => {
         sessionKey: "main",
       });
       await page.locator(".chat-queue").waitFor({ state: "detached", timeout: 10_000 });
-    } finally {
-      await suite.closeBrowserContext(context);
-    }
-  });
-
-  it("steers a queued follow-up with modified Enter in Enter shortcut mode", async () => {
-    const context = await suite.newBrowserContext({
-      locale: "en-US",
-      serviceWorkers: "block",
-      viewport: { height: 900, width: 1280 },
-    });
-    const page = await context.newPage();
-    const gateway = await installMockGateway(page);
-
-    try {
-      await page.goto(`${suite.server.baseUrl}settings/appearance`);
-      await page.locator("[data-settings-follow-up-mode]").selectOption("queue");
-      await page.locator("[data-settings-send-shortcut]").selectOption("enter");
-      await page.goto(`${suite.server.baseUrl}chat`);
-
-      const composer = page.locator(".agent-chat__composer-combobox textarea");
-      await composer.fill("keep the first shortcut run active");
-      await page.getByRole("button", { name: "Send message" }).click();
-      await gateway.waitForRequest("chat.send");
-      await page.getByRole("button", { name: "Stop generating" }).waitFor({ timeout: 10_000 });
-
-      const steerText = "steer this keyboard follow-up now";
-      await composer.fill(steerText);
-      await composer.press("Control+Enter");
-
-      const firstRunSends = await waitForRequests(gateway, "chat.send", 2);
-      const steerParams = requireRecord(firstRunSends[1]?.params);
-      expect(steerParams).toMatchObject({
-        deliver: false,
-        message: steerText,
-        queueMode: "steer",
-        sessionKey: "main",
-      });
-      expect(steerParams).not.toHaveProperty("expectedRunId");
-      expect(steerParams).not.toHaveProperty("expectedLeafEntryId");
     } finally {
       await suite.closeBrowserContext(context);
     }
@@ -428,7 +389,44 @@ suite.define(() => {
 
       const queuedRow = page.locator(".chat-queue__item", { hasText: queuedText });
       await queuedRow.waitFor({ timeout: 10_000 });
-      await queuedRow.getByText("Waiting for current run").waitFor({ timeout: 10_000 });
+      await expectRequestCountStable(gateway, "chat.send", 1);
+    } finally {
+      await suite.closeBrowserContext(context);
+    }
+  });
+
+  it("projects one disconnected state for an offline steer follow-up", async () => {
+    const context = await suite.newBrowserContext({
+      locale: "en-US",
+      serviceWorkers: "block",
+      viewport: { height: 900, width: 1280 },
+    });
+    const page = await context.newPage();
+    const gateway = await installMockGateway(page);
+
+    try {
+      await page.goto(`${suite.server.baseUrl}settings/appearance`);
+      await page.locator("[data-settings-follow-up-mode]").selectOption("steer");
+      await page.locator("[data-settings-send-shortcut]").selectOption("enter");
+      await page.goto(`${suite.server.baseUrl}chat`);
+
+      const composer = page.locator(".agent-chat__composer-combobox textarea");
+      await composer.fill("keep the disconnect run active");
+      await page.getByRole("button", { name: "Send message" }).click();
+      await gateway.waitForRequest("chat.send");
+      await page.getByRole("button", { name: "Stop generating" }).waitFor({ timeout: 10_000 });
+
+      await gateway.setOnline(false);
+      await waitForControlUiGatewayReconnecting(page);
+
+      const followUpText = "steer after the gateway returns";
+      await composer.fill(followUpText);
+      await page.locator(".agent-chat__composer-actions .chat-send-btn--send").click();
+
+      const rows = page.locator(".chat-queue__item");
+      await expect.poll(() => rows.count()).toBe(1);
+      await expect.poll(() => rows.getByText("Waiting for reconnect").count()).toBe(1);
+      expect(await rows.getByText("Steer", { exact: true }).count()).toBe(0);
       await expectRequestCountStable(gateway, "chat.send", 1);
     } finally {
       await suite.closeBrowserContext(context);
@@ -465,7 +463,7 @@ suite.define(() => {
       await composer.fill(followUp);
       await page.getByRole("button", { name: "Queue message" }).click();
       const queuedRow = page.locator(".chat-queue__item", { hasText: followUp });
-      await queuedRow.getByText("Waiting for current run").waitFor({ timeout: 10_000 });
+      await queuedRow.waitFor({ timeout: 10_000 });
       await expectRequestCountStable(gateway, "chat.send", 1);
 
       await gateway.setHistoryMessages([

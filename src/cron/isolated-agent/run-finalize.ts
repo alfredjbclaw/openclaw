@@ -377,6 +377,7 @@ export async function finalizeCronRun(params: {
     delivered?: boolean;
     deliveryAttempted?: boolean;
     deliveryError?: string;
+    deliverySuppressionReason?: RunCronAgentTurnResult["deliverySuppressionReason"];
     delivery?: CronDeliveryTrace;
   }) =>
     prepared.withRunSession({
@@ -389,6 +390,7 @@ export async function finalizeCronRun(params: {
       delivered: result?.delivered,
       deliveryAttempted: result?.deliveryAttempted,
       deliveryError: result?.deliveryError,
+      deliverySuppressionReason: result?.deliverySuppressionReason,
       delivery: result?.delivery,
       diagnostics: mergeCronRunDiagnostics(
         runDiagnostics,
@@ -440,6 +442,7 @@ export async function finalizeCronRun(params: {
     const { queueCronMessageToolDeliveryAwareness } = await loadCronDeliveryRuntime();
     queueSourceSessionMessageToolAwareness = await queueCronMessageToolDeliveryAwareness({
       cfg: prepared.cfgWithAgentDefaults,
+      runSessionKey: prepared.runSessionKey,
       job: prepared.input.job,
       agentId: prepared.agentId,
       agentSessionKey: prepared.agentSessionKey,
@@ -613,6 +616,7 @@ export async function finalizeCronRun(params: {
     return resolveRunOutcome({
       delivered: deliveryResult.result.delivered,
       deliveryAttempted: resultWithDeliveryMeta.deliveryAttempted,
+      deliverySuppressionReason: resultWithDeliveryMeta.deliverySuppressionReason,
       delivery: deliveryTrace,
     });
   }
@@ -623,6 +627,7 @@ export async function finalizeCronRun(params: {
     delivered: deliveryResult.delivered,
     deliveryAttempted: deliveryResult.deliveryAttempted,
     deliveryError: deliveryResult.deliveryError,
+    deliverySuppressionReason: deliveryResult.deliverySuppressionReason,
     delivery: deliveryTrace,
   });
 }

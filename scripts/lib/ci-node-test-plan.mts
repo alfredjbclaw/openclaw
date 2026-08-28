@@ -22,6 +22,10 @@ import {
 } from "../../test/vitest/vitest.unit-fast-paths.mjs";
 import { boundaryTestFiles, isUnitConfigTestFile } from "../../test/vitest/vitest.unit-paths.mjs";
 import { listTrackedTestFiles } from "./list-test-files.mts";
+import {
+  resolveVitestPretestBuildMode,
+  type VitestPretestBuildMode as NodeTestPretestBuildMode,
+} from "./vitest-build-prerequisites.mts";
 
 type NodeTestShardGroup = {
   shard_name: string;
@@ -58,15 +62,6 @@ type NodeTestPlanOptions = {
 };
 
 type CompactNodeTestPlanMode = "pull-request" | "push";
-type NodeTestPretestBuildMode = "private-qa" | "runtime";
-
-const PRETEST_RUNTIME_BUILD_FILES = new Set([
-  "test/e2e/qa-lab/runtime/gateway-support-export-runtime.test.ts",
-]);
-
-function resolvePretestBuildMode(paths: readonly string[]): NodeTestPretestBuildMode | undefined {
-  return paths.some((file) => PRETEST_RUNTIME_BUILD_FILES.has(file)) ? "runtime" : undefined;
-}
 
 type PolicyTestWatch = {
   ownerGlobs?: readonly string[];
@@ -85,8 +80,13 @@ const policyTestWatches = [
   },
   {
     testFile: "ui/src/styles/base-theme-tokens.node.test.ts",
-    ownerGlobs: ["ui/src/**/*.css"],
-    watchGlobs: ["ui/src/**/*.css", "ui/src/**/*.ts"],
+    ownerGlobs: ["ui/src/**/*.css", "ui/public/themes/*.css"],
+    watchGlobs: ["ui/src/**/*.css", "ui/src/**/*.ts", "ui/public/themes/*.css"],
+  },
+  {
+    testFile: "ui/src/styles/base-theme-contrast.node.test.ts",
+    ownerGlobs: ["ui/src/styles/base.css", "ui/public/themes/*.css"],
+    watchGlobs: ["ui/src/styles/base.css", "ui/public/themes/*.css"],
   },
   {
     testFile: "ui/src/styles/cursor-policy.node.test.ts",
@@ -132,7 +132,7 @@ type CompactNodeTestShard = Omit<NodeTestShard, "configs" | "groups"> & {
   groups: NodeTestShardGroup[];
 };
 
-type NodeTestSplitShard = Omit<NodeTestShard, "checkName" | "runner"> & {
+type NodeTestSplitShard = Omit<NodeTestShard, "checkName" | "runner" | "pretestBuildMode"> & {
   includeExternalConfigs?: boolean;
   runner?: string;
 };
@@ -284,7 +284,10 @@ const COMPACT_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["auto-reply-reply-commands-1", 28],
   ["auto-reply-reply-commands-2", 9],
   ["auto-reply-reply-commands-3", 24],
-  ["auto-reply-reply-dispatch", 73],
+  ["auto-reply-reply-dispatch", 15],
+  ["auto-reply-reply-dispatch-core", 35],
+  ["auto-reply-reply-dispatch-delivery", 32],
+  ["auto-reply-reply-dispatch-lifecycle", 8],
   ["auto-reply-reply-session", 34],
   ["auto-reply-reply-state-routing", 63],
   // Apportioned from the split infra-process trio (see below).
@@ -390,7 +393,10 @@ const COMPACT_LARGE_GROUP_STRIPE_SECONDS_HINTS = new Map<string, number>([
   ["auto-reply-reply-commands-1", 34],
   ["auto-reply-reply-commands-2", 11],
   ["auto-reply-reply-commands-3", 28],
-  ["auto-reply-reply-dispatch", 86],
+  ["auto-reply-reply-dispatch", 18],
+  ["auto-reply-reply-dispatch-core", 42],
+  ["auto-reply-reply-dispatch-delivery", 38],
+  ["auto-reply-reply-dispatch-lifecycle", 10],
   ["core-runtime-media-ui-1", 93],
   ["core-runtime-media-ui-2", 93],
   ["core-runtime-media-ui-3", 93],
@@ -477,7 +483,10 @@ const COMPACT_GITHUB_GROUP_SECONDS_HINTS = new Map<string, number>([
   ["auto-reply-reply-commands-1", 53],
   ["auto-reply-reply-commands-2", 26],
   ["auto-reply-reply-commands-3", 48],
-  ["auto-reply-reply-dispatch", 138],
+  ["auto-reply-reply-dispatch", 30],
+  ["auto-reply-reply-dispatch-core", 75],
+  ["auto-reply-reply-dispatch-delivery", 70],
+  ["auto-reply-reply-dispatch-lifecycle", 20],
   ["auto-reply-reply-session", 79],
   ["auto-reply-reply-state-routing", 34],
   // Measured per config inside run 31814517685's combined 175s infra wall.
@@ -787,6 +796,9 @@ const KEEP_LARGE_NODE_TEST_RUNNER = new Set([
   "agentic-gateway-core-3",
   "agentic-gateway-methods",
   "auto-reply-reply-dispatch",
+  "auto-reply-reply-dispatch-core",
+  "auto-reply-reply-dispatch-delivery",
+  "auto-reply-reply-dispatch-lifecycle",
   // The commands stripes and security suite are import-bound (30-45s of
   // module-graph import per file); the 8 vCPU class with a higher Vitest
   // worker budget cuts their wall clock roughly linearly.
@@ -816,12 +828,25 @@ function createAutoReplyReplySplitShards(): NodeTestSplitShard[] {
     "auto-reply-reply-agent-runner": [] as string[],
     "auto-reply-reply-commands": [] as string[],
     "auto-reply-reply-dispatch": [] as string[],
+    "auto-reply-reply-dispatch-core": [] as string[],
+    "auto-reply-reply-dispatch-delivery": [] as string[],
+    "auto-reply-reply-dispatch-lifecycle": [] as string[],
     "auto-reply-reply-session": [] as string[],
     "auto-reply-reply-state-routing": [] as string[],
   };
+  const dispatchEntrypoints = new Map<string, keyof typeof groups>([
+    ["dispatch-from-config.test.ts", "auto-reply-reply-dispatch-core"],
+    ["dispatch-from-config.delivery.test.ts", "auto-reply-reply-dispatch-delivery"],
+    ["dispatch-from-config.lifecycle.test.ts", "auto-reply-reply-dispatch-lifecycle"],
+  ]);
 
   for (const file of files) {
     const name = relative("src/auto-reply/reply", file).replaceAll("\\", "/");
+    const dispatchEntrypointGroup = dispatchEntrypoints.get(name);
+    if (dispatchEntrypointGroup) {
+      groups[dispatchEntrypointGroup].push(file);
+      continue;
+    }
     if (
       name.startsWith("agent-runner") ||
       name.startsWith("acp-") ||
@@ -1558,19 +1583,12 @@ function createToolingSplitShards(): NodeTestSplitShard[] {
       listCompactToolingTestFiles(),
       COMPACT_TOOLING_NODE_TEST_GROUPS,
       stripeFileWeight,
-    ).map((includePatterns, index) => {
-      const pretestBuildMode = resolvePretestBuildMode(includePatterns);
-      const shard: NodeTestSplitShard = {
-        shardName: `core-tooling-${index + 1}`,
-        configs: [TOOLING_CONFIG],
-        includePatterns,
-        requiresDist: false,
-      };
-      if (pretestBuildMode) {
-        shard.pretestBuildMode = pretestBuildMode;
-      }
-      return shard;
-    }),
+    ).map((includePatterns, index) => ({
+      shardName: `core-tooling-${index + 1}`,
+      configs: [TOOLING_CONFIG],
+      includePatterns,
+      requiresDist: false,
+    })),
     {
       shardName: "core-tooling-isolated",
       configs: ["test/vitest/vitest.tooling-docker.config.ts", TOOLING_ISOLATED_CONFIG],
@@ -1878,6 +1896,10 @@ export function createNodeTestShards(options: NodeTestPlanOptions = {}): NodeTes
           return [];
         }
 
+        const pretestBuildMode = resolveVitestPretestBuildMode([
+          { configs: splitConfigs, includePatterns: splitShard.includePatterns },
+        ]);
+
         return [
           {
             checkName: formatNodeTestShardCheckName(splitShard.shardName),
@@ -1885,9 +1907,7 @@ export function createNodeTestShards(options: NodeTestPlanOptions = {}): NodeTes
             configs: splitConfigs,
             ...(splitShard.env ? { env: splitShard.env } : {}),
             ...(splitShard.includePatterns ? { includePatterns: splitShard.includePatterns } : {}),
-            ...(splitShard.pretestBuildMode
-              ? { pretestBuildMode: splitShard.pretestBuildMode }
-              : {}),
+            ...(pretestBuildMode ? { pretestBuildMode } : {}),
             runner: splitShard.runner ?? DEFAULT_NODE_TEST_RUNNER,
             requiresDist: splitShard.requiresDist,
           },
@@ -1895,11 +1915,13 @@ export function createNodeTestShards(options: NodeTestPlanOptions = {}): NodeTes
       });
     }
 
+    const pretestBuildMode = resolveVitestPretestBuildMode([{ configs }]);
     return [
       {
         checkName: formatNodeTestShardCheckName(shard.name),
         shardName: shard.name,
         configs,
+        ...(pretestBuildMode ? { pretestBuildMode } : {}),
         runner: DEFAULT_NODE_TEST_RUNNER,
         requiresDist: DIST_DEPENDENT_NODE_SHARD_NAMES.has(shard.name),
       },

@@ -302,6 +302,8 @@ export type AgentHarnessSessionForkFailureCode =
 
 export type AgentHarnessSessionForkParams = {
   targetKey: string;
+  /** Creator-owned isolation floor resolved by the trusted Gateway request. */
+  sandbox?: "required";
   source: {
     agentId: string;
     sessionId: string;
@@ -424,8 +426,30 @@ type AgentHarnessCompactionCapability = {
   compact?(params: AgentHarnessCompactParams): Promise<AgentHarnessCompactResult | undefined>;
 };
 
+export type AgentHarnessSessionDeletionParams = {
+  agentId: string;
+  sessionKey: string;
+  sessionId: string;
+  lifecycleRevision?: string;
+  /** Revalidate the captured registry, harness, and operation before each side effect. */
+  assertCurrent: () => void;
+};
+
+export type AgentHarnessSessionDeletionMutation = {
+  /** Synchronously remove only the prepared owner's state at the session commit edge. */
+  commit: () => void;
+  /** Restore only that removal when the authoritative session transaction rolls back. */
+  rollback: () => void;
+};
+
 type AgentHarnessSessionLifecycleCapability = {
   reset?(params: AgentHarnessResetParams): Promise<void> | void;
+  /** Prepare outside the session writer; release native resources after its commit completes. */
+  withSessionDeletion?<T>(
+    this: void,
+    params: AgentHarnessSessionDeletionParams,
+    run: (mutation: AgentHarnessSessionDeletionMutation) => Promise<T>,
+  ): Promise<T>;
   dispose?(): Promise<void> | void;
 };
 

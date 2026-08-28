@@ -554,7 +554,7 @@ suite.define(() => {
     }
   });
 
-  it("keeps stale context visible as approximate without warning or compaction", async () => {
+  it("keeps stale context visible as approximate without warning", async () => {
     const context = await suite.newBrowserContext({
       locale: "en-US",
       serviceWorkers: "block",
@@ -586,7 +586,7 @@ suite.define(() => {
       await page.goto(`${suite.server.baseUrl}chat`);
       const trigger = page.locator("summary.context-ring");
       await trigger.waitFor({ timeout: 10_000 });
-      expect((await trigger.textContent())?.trim()).toBe("~95%");
+      expect((await trigger.textContent())?.trim()).toBe("");
       expect(await trigger.getAttribute("aria-label")).toBe(
         "Session context usage: ~190k of 200k (~95%)",
       );
@@ -598,7 +598,6 @@ suite.define(() => {
       await expect
         .poll(() => page.locator(".context-usage__popover").textContent())
         .toContain("~190k / 200k · ~95%");
-      expect(await page.locator(".context-ring__action").count()).toBe(0);
     } finally {
       await suite.closeBrowserContext(context);
     }
@@ -640,7 +639,7 @@ suite.define(() => {
 
       // The background hydrate must not take the shared sessions loading
       // flag, which would disable New session for the whole request.
-      const newThread = page.getByRole("button", { name: "New session" }).first();
+      const newThread = page.getByRole("link", { name: "New session" }).first();
       expect(await newThread.isEnabled()).toBe(true);
 
       await gateway.resolveDeferred("sessions.list");
