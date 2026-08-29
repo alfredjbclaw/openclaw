@@ -179,7 +179,7 @@ export type SessionCapability = {
   recover: (params: { key: string; agentId?: string }) => Promise<SessionsRecoverResult | null>;
   patch: SessionPatchRoute;
   archiveVisibility: (key: string) => SessionArchiveVisibility | undefined;
-  setArchiveVisibility: (key: string, visibility: SessionArchiveVisibility | undefined) => void;
+  setArchivePending: (key: string, pending: boolean) => void;
   assignOwner: (
     key: string,
     owner: SessionsAssignOwnerParams["owner"],
@@ -198,6 +198,11 @@ export type SessionCapability = {
     summary: SessionCatalogPullRequestSummary | undefined,
     epoch?: object,
   ) => void;
+  deletionState: (
+    key: string,
+    agentId?: string | null,
+    sessionId?: string,
+  ) => "pending" | "confirmed" | undefined;
   delete: (key: string, options?: SessionDeleteOptions) => Promise<SessionDeleteOutcome>;
   deleteMany: (targets: readonly SessionDeleteTarget[]) => Promise<SessionDeleteBatchResult>;
   reset: (key: string, options?: SessionResetOptions) => Promise<SessionResetResult>;

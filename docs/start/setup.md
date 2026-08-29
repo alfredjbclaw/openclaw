@@ -27,6 +27,16 @@ Pick a setup workflow based on how often you want updates and whether you want t
   not prepare the full source tree.
 - Docker (optional; only for containerized setup/e2e - see [Docker](/install/docker))
 
+Use the pnpm version pinned in `package.json`. The workspace applies a seven-day
+publication cooldown to npm dependencies, with trusted `@openai/codex` and
+`@openai/codex-*` packages exempt. The standalone pnpm toolchain is managed separately.
+
+For npm tooling that reads the project's `.npmrc`, use npm **11.19 or newer** for
+install and `npm pack` cooldowns and Codex exclusions. Node 22's bundled npm 10
+ignores these settings; Node runtime support does not imply support for its
+bundled npm as a source resolver. [Published/global installs](/install) do not
+inherit the repository's `.npmrc`. Source installs continue to use pnpm.
+
 ## Tailoring strategy (so updates do not hurt)
 
 If you want "100% tailored to me" _and_ easy updates, keep your customization in:
@@ -113,7 +123,7 @@ reloads on relevant source, config, and bundled-plugin metadata changes. If the
 watched Gateway exits during startup, `gateway:watch` runs
 `openclaw doctor --fix --non-interactive` once and retries; set
 `OPENCLAW_GATEWAY_WATCH_AUTO_DOCTOR=0` to disable that dev-only repair pass.
-`pnpm gateway:watch` does not rebuild `dist/control-ui`, so rerun `pnpm ui:build` after `ui/` changes or use `pnpm ui:dev` while developing the Control UI.
+TypeScript rebuilds triggered by `pnpm openclaw ...` or `pnpm gateway:watch` preserve existing `dist/control-ui` assets but do not rebuild them. Run `pnpm ui:build` once and again after `ui/` changes, or use `pnpm ui:dev` while developing the Control UI.
 
 ### 2) Point the macOS app at your running Gateway
 

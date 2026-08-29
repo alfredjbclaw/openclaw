@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -46,6 +47,7 @@ import {
   type WorkerInferenceTerminalFrame,
   type WorkerInferenceTerminalOutcome,
 } from "../../packages/gateway-protocol/src/schema/worker-inference.js";
+import { createNoisyPngBuffer, createSolidPngBuffer } from "../../test/helpers/image-fixtures.js";
 import { createDeferred, withTestTimeout } from "../../test/helpers/promise.js";
 import { createOperationalRunInstanceRef } from "../agents/admitted-run-context.js";
 import {
@@ -56,7 +58,11 @@ import {
 import { runExecProcess } from "../agents/bash-tools.exec-runtime.js";
 import { saveExecApprovals, type ExecApprovalsFile } from "../infra/exec-approvals.js";
 import { getProcessSupervisor } from "../process/supervisor/index.js";
-import { buildWorkerConnectParams, type WorkerLaunchDescriptor } from "./launch-descriptor.js";
+import {
+  buildWorkerConnectParams,
+  parseWorkerLaunchDescriptor,
+  type WorkerLaunchDescriptor,
+} from "./launch-descriptor.js";
 import { WORKER_PROVIDER_REPLAY_LOCAL_RETRY_MESSAGE } from "./transcript-message.js";
 import { runWorkerCommand } from "./worker-command.runtime.js";
 import {
@@ -117,6 +123,7 @@ const WORKER_INFERENCE_START_TIMEOUT_MS = 90_000;
 
 type InferencePlan =
   | "text"
+  | "read-image"
   | "tool"
   | "safe-tool"
   | "background-tool"
@@ -219,21 +226,12 @@ class FakeWorkerGateway {
   }
 
   async start(): Promise<void> {
-    this.rootDir = await mkdtemp(path.join(tmpdir(), "openclaw-worker-gateway-"));
+    // Leave room for the isolated test temp root within macOS Unix socket limits.
+    this.rootDir = await mkdtemp(path.join(tmpdir(), "oc-wg-"));
     this.socketPath = path.join(this.rootDir, "gateway.sock");
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => {
-        this.httpServer.off("listening", onListening);
-        reject(error);
-      };
-      const onListening = () => {
-        this.httpServer.off("error", onError);
-        resolve();
-      };
-      this.httpServer.once("error", onError);
-      this.httpServer.once("listening", onListening);
-      this.httpServer.listen(this.socketPath);
-    });
+    const listening = once(this.webSocketServer, "listening");
+    this.httpServer.listen(this.socketPath);
+    await listening;
   }
 
   async stop(): Promise<void> {
@@ -559,6 +557,14 @@ class FakeWorkerGateway {
     });
     const plan = this.options.inferencePlans?.[this.inferencePlanIndex] ?? "text";
     this.inferencePlanIndex += 1;
+    if (plan === "read-image") {
+      this.sendToolCallTurn(socket, frame.params, {
+        args: { path: "attachment.png" },
+        toolCallId: "read-attachment",
+        toolName: "read",
+      });
+      return;
+    }
     if (plan === "hold") {
       return;
     }
@@ -626,38 +632,18 @@ class FakeWorkerGateway {
     terminal: "done" | "error" = "done",
   ): void {
     const chunk = "x".repeat(40);
-    this.send(socket, {
-      type: "event",
-      event: "worker.inference.event",
-      payload: {
-        ...this.identity(identity),
-        seq: 1,
-        event: {
-          type: "start",
-          resolvedModel: { api: "openai-responses", ...MODEL_REF },
-          timestamp: Date.now(),
-        },
-      },
-    } satisfies WorkerInferenceEventFrame);
-    this.send(socket, {
-      type: "event",
-      event: "worker.inference.event",
-      payload: {
-        ...this.identity(identity),
-        seq: 2,
-        event: { type: "text_start", contentIndex: 0 },
-      },
-    } satisfies WorkerInferenceEventFrame);
+    this.sendInferenceEvent(socket, identity, 1, {
+      type: "start",
+      resolvedModel: { api: "openai-responses", ...MODEL_REF },
+      timestamp: Date.now(),
+    });
+    this.sendInferenceEvent(socket, identity, 2, { type: "text_start", contentIndex: 0 });
     for (let index = 0; index < chunkCount; index += 1) {
-      this.send(socket, {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: index + 3,
-          event: { type: "text_delta", contentIndex: 0, delta: chunk },
-        },
-      } satisfies WorkerInferenceEventFrame);
+      this.sendInferenceEvent(socket, identity, index + 3, {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: chunk,
+      });
     }
     const text = chunk.repeat(chunkCount);
     if (terminal === "error") {
@@ -677,37 +663,17 @@ class FakeWorkerGateway {
   }
 
   private sendEmptyTerminalTurn(socket: WebSocket, identity: WorkerInferenceStartParams): void {
-    this.send(socket, {
-      type: "event",
-      event: "worker.inference.event",
-      payload: {
-        ...this.identity(identity),
-        seq: 1,
-        event: {
-          type: "start",
-          resolvedModel: { api: "openai-responses", ...MODEL_REF },
-          timestamp: Date.now(),
-        },
-      },
-    } satisfies WorkerInferenceEventFrame);
-    this.send(socket, {
-      type: "event",
-      event: "worker.inference.event",
-      payload: {
-        ...this.identity(identity),
-        seq: 2,
-        event: { type: "text_start", contentIndex: 0 },
-      },
-    } satisfies WorkerInferenceEventFrame);
-    this.send(socket, {
-      type: "event",
-      event: "worker.inference.event",
-      payload: {
-        ...this.identity(identity),
-        seq: 3,
-        event: { type: "text_delta", contentIndex: 0, delta: "discarded draft" },
-      },
-    } satisfies WorkerInferenceEventFrame);
+    this.sendInferenceEvent(socket, identity, 1, {
+      type: "start",
+      resolvedModel: { api: "openai-responses", ...MODEL_REF },
+      timestamp: Date.now(),
+    });
+    this.sendInferenceEvent(socket, identity, 2, { type: "text_start", contentIndex: 0 });
+    this.sendInferenceEvent(socket, identity, 3, {
+      type: "text_delta",
+      contentIndex: 0,
+      delta: "discarded draft",
+    });
     this.sendTerminal(socket, identity, 4, assistantMessage([], "stop"));
   }
 
@@ -716,51 +682,18 @@ class FakeWorkerGateway {
     identity: WorkerInferenceStartParams,
     stopReason: "stop" | "length" = "stop",
   ): void {
-    const events: WorkerInferenceEventFrame[] = [
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 1,
-          event: {
-            type: "start",
-            resolvedModel: { api: "openai-responses", ...MODEL_REF },
-            timestamp: Date.now(),
-          },
-        },
-      },
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 2,
-          event: { type: "text_start", contentIndex: 0 },
-        },
-      },
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 3,
-          event: { type: "text_delta", contentIndex: 0, delta: "worker reply" },
-        },
-      },
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 4,
-          event: { type: "text_end", contentIndex: 0 },
-        },
-      },
-    ];
-    for (const event of events) {
-      this.send(socket, event);
-    }
+    this.sendInferenceEvent(socket, identity, 1, {
+      type: "start",
+      resolvedModel: { api: "openai-responses", ...MODEL_REF },
+      timestamp: Date.now(),
+    });
+    this.sendInferenceEvent(socket, identity, 2, { type: "text_start", contentIndex: 0 });
+    this.sendInferenceEvent(socket, identity, 3, {
+      type: "text_delta",
+      contentIndex: 0,
+      delta: "worker reply",
+    });
+    this.sendInferenceEvent(socket, identity, 4, { type: "text_end", contentIndex: 0 });
     this.sendTerminal(
       socket,
       identity,
@@ -812,51 +745,23 @@ class FakeWorkerGateway {
   ): void {
     const { args, toolCallId, toolName } = tool;
     const encodedArgs = JSON.stringify(args);
-    const events: WorkerInferenceEventFrame[] = [
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 1,
-          event: {
-            type: "start",
-            resolvedModel: { api: "openai-responses", ...MODEL_REF },
-            timestamp: Date.now(),
-          },
-        },
-      },
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 2,
-          event: { type: "toolcall_start", contentIndex: 0, id: toolCallId, toolName },
-        },
-      },
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 3,
-          event: { type: "toolcall_delta", contentIndex: 0, delta: encodedArgs },
-        },
-      },
-      {
-        type: "event",
-        event: "worker.inference.event",
-        payload: {
-          ...this.identity(identity),
-          seq: 4,
-          event: { type: "toolcall_end", contentIndex: 0 },
-        },
-      },
-    ];
-    for (const event of events) {
-      this.send(socket, event);
-    }
+    this.sendInferenceEvent(socket, identity, 1, {
+      type: "start",
+      resolvedModel: { api: "openai-responses", ...MODEL_REF },
+      timestamp: Date.now(),
+    });
+    this.sendInferenceEvent(socket, identity, 2, {
+      type: "toolcall_start",
+      contentIndex: 0,
+      id: toolCallId,
+      toolName,
+    });
+    this.sendInferenceEvent(socket, identity, 3, {
+      type: "toolcall_delta",
+      contentIndex: 0,
+      delta: encodedArgs,
+    });
+    this.sendInferenceEvent(socket, identity, 4, { type: "toolcall_end", contentIndex: 0 });
     this.sendTerminal(
       socket,
       identity,
@@ -866,6 +771,20 @@ class FakeWorkerGateway {
         "toolUse",
       ),
     );
+  }
+
+  private sendInferenceEvent(
+    socket: WebSocket,
+    identity: WorkerInferenceStartParams,
+    seq: number,
+    event: WorkerInferenceEventFrame["payload"]["event"],
+  ): void {
+    const frame: WorkerInferenceEventFrame = {
+      type: "event",
+      event: "worker.inference.event",
+      payload: { ...this.identity(identity), seq, event },
+    };
+    this.send(socket, frame);
   }
 
   private sendTerminal(
@@ -972,6 +891,84 @@ afterEach(async () => {
 });
 
 describe("worker runtime", () => {
+  it("sends current image and scanned PDF page content through remote inference exactly once", async () => {
+    const { gateway, launch } = await setup();
+    const images = [
+      {
+        type: "image" as const,
+        data: createNoisyPngBuffer(320, 240).toString("base64"),
+        mimeType: "image/png",
+      },
+      {
+        type: "image" as const,
+        data: createSolidPngBuffer(2, 2, { r: 0, g: 128, b: 255 }).toString("base64"),
+        mimeType: "image/png",
+      },
+    ];
+    const prompt = [
+      { type: "text" as const, text: "Inspect the attached image and PDF page." },
+      ...images,
+    ];
+    launch.assignment.prompt = prompt;
+    launch.assignment.suppressPromptTranscript = true;
+
+    await expect(runWorkerDescriptor(parseWorkerLaunchDescriptor(launch))).resolves.toMatchObject({
+      status: "completed",
+    });
+
+    expect(gateway.inferenceRequests[0]?.context.messages).toEqual([
+      {
+        role: "user",
+        content: prompt,
+        timestamp: expect.any(Number),
+      },
+    ]);
+    expect(
+      gateway.transcriptRequests.flatMap((request) =>
+        request.messages.map((message) => message.role),
+      ),
+    ).toEqual(["assistant"]);
+  });
+  it.each(["input", "tool"] as const)(
+    "settles a real image above 64 KiB through %s",
+    async (source) => {
+      const { gateway, workspaceDir, launch } = await setup({
+        inferencePlans: ["read-image", "text"],
+      });
+      const png = createNoisyPngBuffer(256, 256);
+      expect(png.length).toBeGreaterThan(64 * 1024);
+      const image = { type: "image" as const, data: png.toString("base64"), mimeType: "image/png" };
+      await writeFile(path.join(workspaceDir, "attachment.png"), png);
+      if (source === "input") {
+        launch.assignment.prompt = [image];
+        launch.assignment.initialMessages = [{ role: "user", content: [image], timestamp: 1 }];
+      }
+
+      const result = await runWorkerDescriptor(parseWorkerLaunchDescriptor(launch));
+
+      expect(result.status).toBe("completed");
+      expect(gateway.inferenceRequests).toHaveLength(2);
+      if (source === "input") {
+        expect(
+          gateway.inferenceRequests[0]?.context.messages
+            .filter((message) => message.role === "user")
+            .map((message) => message.content),
+        ).toEqual([[image], [image]]);
+      }
+      const messages = gateway.acceptedTranscriptRequests.flatMap((request) => request.messages);
+      const toolResult = messages.find((message) => message.role === "toolResult");
+      expect(toolResult).toMatchObject({ role: "toolResult", toolName: "read", isError: false });
+      expect(toolResult?.content).toContainEqual(image);
+      expect(gateway.inferenceRequests[1]?.context.messages).toContainEqual(toolResult);
+      expect(messages.at(-1)?.role).toBe("assistant");
+      expect(
+        gateway.applicationOrder.findIndex((entry) => entry === "live:lifecycle:finishing"),
+      ).toBeGreaterThan(
+        gateway.applicationOrder.findLastIndex((entry) => entry.startsWith("transcript:")),
+      );
+    },
+  );
+
   it("runs a full embedded turn through remote inference, live events, and transcript commits", async () => {
     const { gateway, workspaceDir, launch } = await setup();
     await writeFile(path.join(workspaceDir, "AGENTS.md"), "worker-bootstrap-marker", "utf8");
@@ -1557,7 +1554,7 @@ describe("worker runtime", () => {
       .find((event) => event.kind === "assistant");
     expect(finalAssistant).toEqual({
       kind: "assistant",
-      payload: { text: "", delta: "", replace: true },
+      payload: { text: "", delta: "", replace: true, itemId: expect.any(String) },
     });
   });
 

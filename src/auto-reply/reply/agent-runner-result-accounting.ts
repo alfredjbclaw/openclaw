@@ -61,6 +61,10 @@ export async function accountAgentTurn(context: AgentTurnAccountingContext) {
     storePath,
   } = context;
   let { activeSessionEntry } = context;
+  const expectedSession = {
+    sessionId: activeSessionEntry?.sessionId ?? followupRun.run.sessionId,
+    lifecycleRevision: activeSessionEntry?.lifecycleRevision,
+  };
 
   const runResult = execution.result;
   const fallbackProvider = execution.resolved.provider;
@@ -261,6 +265,7 @@ export async function accountAgentTurn(context: AgentTurnAccountingContext) {
   await persistRunSessionUsage({
     storePath,
     sessionKey,
+    expectedSession,
     cfg,
     agentDir: followupRun.run.agentDir,
     usage,
@@ -275,6 +280,7 @@ export async function accountAgentTurn(context: AgentTurnAccountingContext) {
     providerUsed,
     contextTokensUsed,
     contextTokensSource,
+    contextBudgetStatus: runResult.meta?.agentMeta?.contextBudgetStatus,
     systemPromptReport: runResult.meta?.systemPromptReport,
     cliSessionId,
     cliSessionBinding,
@@ -299,6 +305,7 @@ export async function accountAgentTurn(context: AgentTurnAccountingContext) {
   return {
     activeSessionEntry,
     autoCompactionCount,
+    expectedSession,
     configuredFallbackModel,
     contextTokensUsed,
     didLogHeartbeatStrip,
@@ -386,6 +393,7 @@ export async function accountFollowupTurn(params: {
     const count = await incrementRunCompactionCount({
       agentId: turn.queued.run.agentId,
       cfg: turn.config,
+      expectedSession: accounting.expectedSession,
       sessionEntry: turn.session.current(),
       sessionStore: turn.sessionStore,
       sessionKey,

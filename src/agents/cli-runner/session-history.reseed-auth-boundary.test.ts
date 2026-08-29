@@ -9,8 +9,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CURRENT_SESSION_VERSION } from "openclaw/plugin-sdk/agent-sessions";
 import { describe, expect, it } from "vitest";
+import {
+  upsertSessionEntryCore,
+  type SessionTranscriptRuntimeTarget,
+} from "../../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 import {
@@ -20,48 +23,34 @@ import {
   resolveCliSessionReuse,
   setCliSessionId,
 } from "../cli-session.js";
+import { SessionManager } from "../sessions/session-manager.js";
 import { buildCliSessionHistoryPrompt, loadCliSessionReseedMessages } from "./session-history.js";
 
-function createSessionTranscript(params: {
+/** Canonical session-store target for a transcript under `rootDir`. */
+function sessionTargetIn(rootDir: string, sessionId: string): SessionTranscriptRuntimeTarget {
+  return {
+    agentId: "main",
+    sessionId,
+    sessionKey: "agent:main:main",
+    storePath: path.join(rootDir, "agents", "main", "sessions", "sessions.json"),
+  };
+}
+
+async function createSessionTranscript(params: {
   rootDir: string;
   sessionId: string;
   messages: string[];
-}): string {
-  // Same canonical JSONL envelope order the sibling suite writes, so the loader
-  // exercises the shape persisted OpenClaw sessions actually have.
-  const sessionFile = path.join(
-    params.rootDir,
-    "agents",
-    "main",
-    "sessions",
-    `${params.sessionId}.jsonl`,
-  );
-  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
-  fs.writeFileSync(
-    sessionFile,
-    `${JSON.stringify({
-      type: "session",
-      version: CURRENT_SESSION_VERSION,
-      id: params.sessionId,
-      timestamp: new Date(0).toISOString(),
-      cwd: params.rootDir,
-    })}\n`,
-    "utf-8",
-  );
+}): Promise<SessionTranscriptRuntimeTarget> {
+  // Written through the canonical session store the loader actually reads, so
+  // the reseed path exercises the shape persisted OpenClaw sessions have.
+  const target = sessionTargetIn(params.rootDir, params.sessionId);
+  await upsertSessionEntryCore(target, { sessionId: params.sessionId, updatedAt: 1 });
+  const manager = SessionManager.open(target, params.rootDir);
   for (const [index, message] of params.messages.entries()) {
-    fs.appendFileSync(
-      sessionFile,
-      `${JSON.stringify({
-        type: "message",
-        id: `msg-${index}`,
-        parentId: index > 0 ? `msg-${index - 1}` : null,
-        timestamp: new Date(index + 1).toISOString(),
-        message: { role: "user", content: message, timestamp: index + 1 },
-      })}\n`,
-      "utf-8",
-    );
+    manager.appendMessage({ role: "user", content: message, timestamp: index + 1 });
   }
-  return sessionFile;
+  manager.flushPendingPersistence();
+  return target;
 }
 
 async function withCliSessionState<T>(stateDir: string, run: () => Promise<T>): Promise<T> {
@@ -100,7 +89,7 @@ describe("raw reseed across a cleared binding that recorded no auth identity", (
     authEpochVersion: number;
   }): Promise<unknown[]> {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-cli-state-"));
-    const sessionFile = createSessionTranscript({
+    const sessionTarget = await createSessionTranscript({
       rootDir: stateDir,
       sessionId: "session-cleared-bare-binding",
       messages: ["prior-auth secret"],
@@ -112,10 +101,7 @@ describe("raw reseed across a cleared binding that recorded no auth identity", (
     try {
       return await withCliSessionState(stateDir, async () =>
         loadCliSessionReseedMessages({
-          sessionId: "session-cleared-bare-binding",
-          sessionFile,
-          sessionKey: "agent:main:main",
-          agentId: "main",
+          sessionTarget,
           // The claude-cli backend opts in (`reseedFromRawTranscriptWhenUncompacted`).
           allowRawTranscriptReseed: true,
           rawTranscriptReseedReason: reseedReasonForNextTurn(entry, current),
@@ -157,34 +143,25 @@ describe("compacted transcripts across an auth boundary", () => {
   } as const;
   const SESSION_ID = "session-compacted-auth-boundary";
 
-  function createCompactedTranscript(rootDir: string): string {
-    const sessionFile = createSessionTranscript({
-      rootDir,
-      sessionId: SESSION_ID,
-      messages: ["prior-auth secret"],
+  async function createCompactedTranscript(
+    rootDir: string,
+  ): Promise<SessionTranscriptRuntimeTarget> {
+    const target = sessionTargetIn(rootDir, SESSION_ID);
+    await upsertSessionEntryCore(target, { sessionId: SESSION_ID, updatedAt: 1 });
+    const manager = SessionManager.open(target, rootDir);
+    const kept = manager.appendMessage({
+      role: "user",
+      content: "prior-auth secret",
+      timestamp: 1,
     });
-    fs.appendFileSync(
-      sessionFile,
-      `${JSON.stringify({
-        type: "compaction",
-        id: "compact-1",
-        timestamp: new Date(2).toISOString(),
-        summary: "Summary derived from the prior-auth conversation",
-      })}\n`,
-      "utf-8",
-    );
-    fs.appendFileSync(
-      sessionFile,
-      `${JSON.stringify({
-        type: "message",
-        id: "msg-tail",
-        parentId: "compact-1",
-        timestamp: new Date(3).toISOString(),
-        message: { role: "user", content: "post-compaction tail secret", timestamp: 3 },
-      })}\n`,
-      "utf-8",
-    );
-    return sessionFile;
+    manager.appendCompaction("Summary derived from the prior-auth conversation", kept, 1000);
+    manager.appendMessage({
+      role: "user",
+      content: "post-compaction tail secret",
+      timestamp: 3,
+    });
+    manager.flushPendingPersistence();
+    return target;
   }
 
   /** Reseed the compacted transcript for a turn whose identity is `current`. */
@@ -194,7 +171,7 @@ describe("compacted transcripts across an auth boundary", () => {
     authEpochVersion: number;
   }): Promise<{ reason: string; messages: unknown[] }> {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-cli-state-"));
-    const sessionFile = createCompactedTranscript(stateDir);
+    const sessionTarget = await createCompactedTranscript(stateDir);
     const entry = { sessionId: SESSION_ID } as SessionEntry;
     setCliSessionId(entry, "claude-cli", "sid-bare", PRIOR_IDENTITY);
     clearCliSession(entry, "claude-cli", cliSessionClearAuthFromRun(PRIOR_IDENTITY));
@@ -205,10 +182,7 @@ describe("compacted transcripts across an auth boundary", () => {
         reason,
         messages: await withCliSessionState(stateDir, async () =>
           loadCliSessionReseedMessages({
-            sessionId: SESSION_ID,
-            sessionFile,
-            sessionKey: "agent:main:main",
-            agentId: "main",
+            sessionTarget,
             allowRawTranscriptReseed: true,
             rawTranscriptReseedReason: reason,
           }),

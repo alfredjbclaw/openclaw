@@ -241,6 +241,15 @@ export interface SessionConversations {
   session_id: string;
 }
 
+export interface SessionGoalOperations {
+  expires_at: number;
+  operation_id: string;
+  request_fingerprint: string;
+  result_json: string;
+  session_id: string;
+  session_key: string;
+}
+
 export interface SessionKeyContract {
   id: Generated<number>;
   main_key: string;
@@ -289,11 +298,10 @@ export interface SessionNodes {
 
 export interface SessionParticipants {
   actor_id: string;
-  actor_source: string | null;
-  actor_type: string;
-  contribution_count: number | null;
-  first_prompted_at: number;
-  last_prompted_at: number;
+  contribution_count: number;
+  first_prompted_at: number | null;
+  identity_namespace: string;
+  last_prompted_at: number | null;
   session_key: string;
 }
 
@@ -321,6 +329,7 @@ export interface SessionSuggestions {
 
 export interface SessionTranscriptActiveEvents {
   active_position: number;
+  context_eligible: number | null;
   event_seq: number;
   message_position: number | null;
   session_id: string;
@@ -517,6 +526,7 @@ export interface DB {
   message_tool_run_outcomes: MessageToolRunOutcomes;
   schema_meta: SchemaMeta;
   session_conversations: SessionConversations;
+  session_goal_operations: SessionGoalOperations;
   session_key_contract: SessionKeyContract;
   session_members: SessionMembers;
   session_nodes: SessionNodes;

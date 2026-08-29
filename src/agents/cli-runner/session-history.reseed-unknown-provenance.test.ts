@@ -22,17 +22,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CURRENT_SESSION_VERSION } from "openclaw/plugin-sdk/agent-sessions";
 import { afterEach, describe, expect, it } from "vitest";
 import { persistSessionUsageUpdate } from "../../auto-reply/reply/session-usage.js";
 import {
   loadSessionEntry,
   replaceSessionEntry,
-  replaceTranscriptEvents,
+  upsertSessionEntryCore,
 } from "../../config/sessions/session-accessor.js";
 import type { CliSessionBinding, SessionEntry } from "../../config/sessions/types.js";
 import { CLI_AUTH_EPOCH_VERSION } from "../cli-auth-epoch.js";
 import { getCliSessionBinding, resolveCliSessionReuse } from "../cli-session.js";
+import { SessionManager } from "../sessions/session-manager.js";
 import { buildCliSessionHistoryPrompt, loadCliSessionReseedMessages } from "./session-history.js";
 
 const AGENT_ID = "main";
@@ -86,48 +86,28 @@ function createStorePath(): string {
 /**
  * Writes the prior conversation into the SQLite transcript store.
  *
- * No JSONL file is written, so `loadCliSessionEntries` falls through its file
- * reader to the transcript-store reader this PR added — the exact configuration
- * the reported regression lives on.
+ * No JSONL file is written: the canonical store is the only transcript source
+ * `loadCliSessionEntries` reads — the exact configuration the reported
+ * regression lives on.
  */
 async function seedTranscript(storePath: string, shape: "raw" | "compacted"): Promise<void> {
-  const events: unknown[] = [
-    {
-      type: "session",
-      version: CURRENT_SESSION_VERSION,
-      id: SESSION_ID,
-      timestamp: new Date(0).toISOString(),
-      cwd: path.dirname(storePath),
-    },
-    {
-      type: "message",
-      id: "msg-prior",
-      parentId: null,
-      timestamp: new Date(1).toISOString(),
-      message: { role: "user", content: RAW_SECRET, timestamp: 1 },
-    },
-  ];
+  const target = {
+    agentId: AGENT_ID,
+    sessionId: SESSION_ID,
+    sessionKey: SESSION_KEY,
+    storePath,
+  };
+  await upsertSessionEntryCore(target, { sessionId: SESSION_ID, updatedAt: 1 });
+  // Written through SessionManager so the compaction boundary carries the
+  // retained-cut metadata the canonical reader rebuilds context from; a
+  // hand-rolled compaction event has no first-kept entry to anchor to.
+  const manager = SessionManager.open(target, path.dirname(storePath));
+  const kept = manager.appendMessage({ role: "user", content: RAW_SECRET, timestamp: 1 });
   if (shape === "compacted") {
-    events.push(
-      {
-        type: "compaction",
-        id: "compact-1",
-        timestamp: new Date(2).toISOString(),
-        summary: SUMMARY_SECRET,
-      },
-      {
-        type: "message",
-        id: "msg-tail",
-        parentId: "compact-1",
-        timestamp: new Date(3).toISOString(),
-        message: { role: "user", content: TAIL_SECRET, timestamp: 3 },
-      },
-    );
+    manager.appendCompaction(SUMMARY_SECRET, kept, 1000);
+    manager.appendMessage({ role: "user", content: TAIL_SECRET, timestamp: 3 });
   }
-  await replaceTranscriptEvents(
-    { agentId: AGENT_ID, sessionId: SESSION_ID, sessionKey: SESSION_KEY, storePath },
-    events,
-  );
+  manager.flushPendingPersistence();
 }
 
 /** Record shapes a stored CLI session can have when the clear arrives. */
@@ -206,12 +186,12 @@ async function historyPromptForNextTurn(params: {
   const invalidatedReason = reuse.mode === "invalidate" ? reuse.invalidatedReason : undefined;
   const reason = invalidatedReason ?? "missing-transcript";
   const messages = await loadCliSessionReseedMessages({
-    sessionId: SESSION_ID,
-    // Deliberately absent on disk: the store reader is the path under test.
-    sessionFile: path.join(path.dirname(params.storePath), `${SESSION_ID}.jsonl`),
-    sessionKey: SESSION_KEY,
-    agentId: AGENT_ID,
-    config: { session: { store: params.storePath } },
+    sessionTarget: {
+      agentId: AGENT_ID,
+      sessionId: SESSION_ID,
+      sessionKey: SESSION_KEY,
+      storePath: params.storePath,
+    },
     // The claude-cli backend opts in (`reseedFromRawTranscriptWhenUncompacted`).
     allowRawTranscriptReseed: true,
     rawTranscriptReseedReason: reason,

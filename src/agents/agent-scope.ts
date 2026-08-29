@@ -45,6 +45,7 @@ export {
   resolveAgentDir,
   resolveDefaultAgentDir,
   resolveAgentWorkspaceDir,
+  resolveAgentWorkspaceProvisioning,
   tryResolveConfiguredAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveAmbientOwnerAgentId,
@@ -55,6 +56,7 @@ export {
   tryResolveDefaultAgentId,
   AgentSelectionRequiredError,
   type AgentSelectionContext,
+  type AgentWorkspaceProvisioning,
   type ResolvedAgentConfig,
 } from "./agent-scope-config.js";
 
@@ -301,7 +303,7 @@ export function clearAutoFallbackPrimaryProbeSelection(
 
 export { resolveAgentIdFromSessionKey };
 
-export function resolveSessionAgentIds(params: {
+export function resolveSessionAgentIdsStrict(params: {
   sessionKey?: string;
   config?: OpenClawConfig;
   agentId?: string | undefined;
@@ -358,14 +360,18 @@ export function resolveSessionAgentIds(params: {
   return { defaultAgentId, sessionAgentId };
 }
 
-export function resolveSessionAgentId(params: {
+export const resolveSessionAgentIds = resolveSessionAgentIdsStrict;
+
+export function resolveSessionAgentIdStrict(params: {
   sessionKey?: string;
   config?: OpenClawConfig;
   agentId?: string;
   fallbackAgentId?: string;
 }): string {
-  return resolveSessionAgentIds(params).sessionAgentId;
+  return resolveSessionAgentIdsStrict(params).sessionAgentId;
 }
+
+export const resolveSessionAgentId = resolveSessionAgentIdStrict;
 
 export function resolveAgentExecutionContract(
   cfg: OpenClawConfig | undefined,

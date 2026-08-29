@@ -103,7 +103,6 @@ export type ChatPageHost = ChatHost &
     waitingApprovalResolvedIds: Set<string>;
     chatRunStatus: ChatProps["runStatus"];
     chatNewMessagesBelow: boolean;
-    chatMetadataRequestVersion: number;
     chatModelsLoading: boolean;
     sessionsLoading: boolean;
     lastErrorCode: string | null;
@@ -142,7 +141,7 @@ export type ChatPageHost = ChatHost &
       messageOverride?: string,
       options?: unknown,
       submissionAction?: Event,
-    ) => Promise<void>;
+    ) => Promise<boolean | void>;
     handleAbortChat: (options?: unknown) => Promise<void>;
     removeQueuedMessage: (id: string) => void;
     retryQueuedChatMessage: (id: string) => Promise<void>;

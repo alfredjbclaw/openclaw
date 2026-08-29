@@ -111,8 +111,13 @@ struct MacNodeCodexThreadCatalogTests {
             body: body)
     }
 
-    private func makeBlockedFirstRequestServer() throws -> FakeCodex {
-        try self.makeAppServer(
+    private func makeBlockedRequestServer(warmup: Bool = false) throws -> FakeCodex {
+        let warmupResponse = warmup ? #"""
+        id=$(printf '%s\n' "$request" | /usr/bin/sed -E 's/.*"id":([0-9]+).*/\1/')
+        printf '{"id":%s,"result":{"data":[]}}\n' "$id"
+        IFS= read -r request || exit 5
+        """# : ""
+        return try self.makeAppServer(
             preamble: #"""
             count=0
             [ ! -f "${0}.processes" ] || count=$(cat "${0}.processes")
@@ -122,9 +127,11 @@ struct MacNodeCodexThreadCatalogTests {
             body: #"""
             IFS= read -r request || exit 4
             if [ "$count" = 1 ]; then
-              touch "${0}.request-started"
-              sleep 5
-              exit 0
+              \#(warmupResponse)
+              printf '%s\n' "$request" > "${0}.request-started"
+              IFS= read -r unexpected || exit 0
+              printf '%s\n' "$unexpected" > "${0}.unexpected-request"
+              exit 6
             fi
             id=$(printf '%s\n' "$request" | /usr/bin/sed -E 's/.*"id":([0-9]+).*/\1/')
             printf '{"id":%s,"result":{"data":[]}}\n' "$id"
@@ -197,13 +204,28 @@ struct MacNodeCodexThreadCatalogTests {
     }
 
     private func openFIFOForWriting(_ url: URL) async throws -> FileHandle {
-        let handle = try await Task.detached {
-            try FileHandle(forWritingTo: url)
-        }.value
-        // The FIFO reader is a spawned fake child; if it exits before the exit
-        // gate write, an unsuppressed SIGPIPE kills the whole test harness.
-        try TestProcessSupport.suppressSIGPIPE(handle)
-        return handle
+        while true {
+            try Task.checkCancellation()
+            let descriptor = Darwin.open(url.path, O_WRONLY | O_NONBLOCK | O_CLOEXEC)
+            if descriptor >= 0 {
+                let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                do {
+                    try Task.checkCancellation()
+                    // The FIFO reader is a spawned fake child; if it exits before the
+                    // gate write, an unsuppressed SIGPIPE kills the whole test harness.
+                    try TestProcessSupport.suppressSIGPIPE(handle)
+                    return handle
+                } catch {
+                    try? handle.close()
+                    throw error
+                }
+            }
+            let openError = errno
+            guard openError == ENXIO || openError == EINTR else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(openError))
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private func requestEmptyList(
@@ -1207,13 +1229,15 @@ extension MacNodeCodexThreadCatalogTests {
             [ ! -f "${0}.processes" ] || count=$(cat "${0}.processes")
             count=$((count + 1))
             printf '%s\n' "$count" > "${0}.processes"
+            printf '%s\n' "$$" > "${0}.pid"
+            [ "$count" != 1 ] || mkfifo "${0}.idle-output-gate"
             """#,
             body: #"""
             while IFS= read -r request; do
               id=$(printf '%s\n' "$request" | /usr/bin/sed -E 's/.*"id":([0-9]+).*/\1/')
               printf '{"id":%s,"result":{"data":[]}}\n' "$id"
               if [ "$count" = 1 ]; then
-                sleep 0.1
+                IFS= read -r _ < "${0}.idle-output-gate"
                 printf '%512s\n' x
               fi
             done
@@ -1226,7 +1250,13 @@ extension MacNodeCodexThreadCatalogTests {
             client: client,
             executable: fake.executable,
             maxLineBytes: 128)
-        try await Task.sleep(for: .milliseconds(300))
+        let outputGate = try await self.openFIFOForWriting(
+            URL(fileURLWithPath: fake.executable.path + ".idle-output-gate"))
+        let pid = try await TestProcessSupport.waitForPID(
+            in: URL(fileURLWithPath: fake.executable.path + ".pid"))
+        try outputGate.write(contentsOf: Data("emit\n".utf8))
+        try outputGate.close()
+        #expect(await TestProcessSupport.waitUntilGone(pid))
         _ = try await self.requestEmptyList(
             client: client,
             executable: fake.executable,
@@ -1238,8 +1268,10 @@ extension MacNodeCodexThreadCatalogTests {
     }
 
     @Test func `timeout restarts the client without dropping the next request`() async throws {
-        let fake = try makeBlockedFirstRequestServer()
+        let fake = try makeBlockedRequestServer(warmup: true)
         let client = CodexAppServerThreadClient(idleTimeoutSeconds: 10)
+        // Complete the real handshake before exercising an active or queued deadline.
+        _ = try await self.requestEmptyList(client: client, executable: fake.executable)
 
         let first = Task {
             try await self.requestEmptyList(
@@ -1264,12 +1296,10 @@ extension MacNodeCodexThreadCatalogTests {
     }
 
     @Test func `queued request consumes its wall-clock deadline`() async throws {
-        let fake = try makeAppServer(body: #"""
-        IFS= read -r request || exit 4
-        touch "${0}.request-started"
-        sleep 5
-        """#)
+        let fake = try makeBlockedRequestServer(warmup: true)
         let client = CodexAppServerThreadClient(idleTimeoutSeconds: 10)
+        // Complete the real handshake before exercising an active or queued deadline.
+        _ = try await self.requestEmptyList(client: client, executable: fake.executable)
 
         let first = Task {
             try await self.requestEmptyList(
@@ -1292,11 +1322,14 @@ extension MacNodeCodexThreadCatalogTests {
         await #expect(throws: MacNodeCodexThreadCatalog.CatalogError.timedOut) {
             try await first.value
         }
+        #expect(!FileManager.default.fileExists(atPath: fake.executable.path + ".unexpected-request"))
+        #expect(try self.readTrimmed(
+            URL(fileURLWithPath: fake.executable.path + ".processes")) == "1")
         await client.shutdown()
     }
 
     @Test func `cancellation restarts the client without dropping the next request`() async throws {
-        let fake = try makeBlockedFirstRequestServer()
+        let fake = try makeBlockedRequestServer()
         let client = CodexAppServerThreadClient(idleTimeoutSeconds: 10)
         let first = Task {
             try await self.requestEmptyList(
@@ -1405,38 +1438,79 @@ extension MacNodeCodexThreadCatalogTests {
     }
 
     @Test func `uses the active request frame limit after advancing the queue`() async throws {
-        let fake = try makeAppServer(body: #"""
+        let fake = try makeAppServer(preamble: #"mkfifo "${0}.response-gate""#, body: #"""
+        IFS= read -r warmup || exit 3
+        warmup_id=$(printf '%s\n' "$warmup" | /usr/bin/sed -E 's/.*"id":([0-9]+).*/\1/')
+        printf '{"id":%s,"result":{"data":[]}}\n' "$warmup_id"
         IFS= read -r first || exit 4
         first_id=$(printf '%s\n' "$first" | /usr/bin/sed -E 's/.*"id":([0-9]+).*/\1/')
-        touch "${0}.first-started"
-        sleep 0.1
+        IFS= read -r _ < "${0}.response-gate"
         printf '{"id":%s,"result":{"data":[]}}\n' "$first_id"
         IFS= read -r second || exit 5
         second_id=$(printf '%s\n' "$second" | /usr/bin/sed -E 's/.*"id":([0-9]+).*/\1/')
         padding=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
         printf '{"id":%s,"result":{"data":[],"padding":"%s"}}\n' "$second_id" "$padding"
-        sleep 1
+        IFS= read -r _ || exit 0
         """#)
+        defer { withExtendedLifetime(fake) {} }
         let client = CodexAppServerThreadClient(idleTimeoutSeconds: 10)
+        do {
+            _ = try await self.requestEmptyList(client: client, executable: fake.executable)
 
-        let first = Task {
-            try await self.requestEmptyList(
-                client: client,
-                executable: fake.executable,
-                maxLineBytes: 1024)
-        }
-        #expect(await self.waitForFile(
-            URL(fileURLWithPath: fake.executable.path + ".first-started")))
-        let second = Task {
-            try await self.requestEmptyList(
-                client: client,
-                executable: fake.executable,
-                maxLineBytes: 64)
-        }
-
-        _ = try await first.value
-        await #expect(throws: MacNodeCodexThreadCatalog.CatalogError.responseTooLarge) {
-            try await second.value
+            let readiness = Task {
+                try await self.openFIFOForWriting(
+                    URL(fileURLWithPath: fake.executable.path + ".response-gate"))
+            }
+            let first = Task {
+                defer { readiness.cancel() }
+                return try await self.requestEmptyList(
+                    client: client,
+                    executable: fake.executable,
+                    maxLineBytes: 1024)
+            }
+            defer {
+                readiness.cancel()
+                first.cancel()
+            }
+            do {
+                // Acquiring the writer witnesses the first request reaching the fake's
+                // reader, without a separate deadline starting before queue admission.
+                let responseGate: FileHandle
+                do {
+                    responseGate = try await readiness.value
+                } catch is CancellationError {
+                    _ = try await first.value
+                    // A response before FIFO readiness is a fixture failure too.
+                    throw CancellationError()
+                }
+                defer { try? responseGate.close() }
+                let second = Task {
+                    try await self.requestEmptyList(
+                        client: client,
+                        executable: fake.executable,
+                        maxLineBytes: 64)
+                }
+                defer { second.cancel() }
+                do {
+                    try responseGate.write(contentsOf: Data("respond\n".utf8))
+                    try responseGate.close()
+                    _ = try await first.value
+                    await #expect(throws: MacNodeCodexThreadCatalog.CatalogError.responseTooLarge) {
+                        try await second.value
+                    }
+                } catch {
+                    second.cancel()
+                    _ = await second.result
+                    throw error
+                }
+            } catch {
+                first.cancel()
+                _ = await first.result
+                throw error
+            }
+        } catch {
+            await client.shutdown()
+            throw error
         }
         await client.shutdown()
     }
