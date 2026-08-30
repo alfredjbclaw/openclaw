@@ -124,6 +124,12 @@ honored for that stdio process. If the Mac config selects `"unix"`,
 capability or command, and a stale direct invocation fails instead of exposing
 the user Codex home or spawning a different local stdio App Server.
 
+The optional `agentId` in native Mac catalog list/read requests identifies the
+Gateway's OpenClaw route owner. It cannot select an agent-specific Codex home;
+the native catalog remains user-home stdio only. Headless node catalog requests
+still resolve `agentId` against that node's configured agents and use the selected
+agent's configured catalog source. This does not map agent IDs between computers.
+
 A newly advertised node command changes the node's approved command surface.
 Approve the update from the Gateway host:
 
@@ -230,13 +236,15 @@ omitted when a cap is reached. An image or local-image input becomes the literal
 `[Image attachment]` placeholder; image data and local paths are not copied.
 
 Send the first normal Chat message to begin work. The Codex harness installs the
-real approval, elicitation, event, and delivery handlers. It uses a temporary
+real approval, elicitation, event, and delivery handlers. It uses an ephemeral
 native fork on the supervision connection to pin the source snapshot without
 supplying a model or provider override. Codex App Server selects both from its
-current native configuration and returns the actual selection. On that same
+current native configuration and returns the actual selection. OpenClaw confirms
+the probe's subscription is released before creating the canonical branch; the
+probe never becomes stored history or an archive artifact. On that same
 connection, OpenClaw starts the canonical `appServer`-source full harness thread
 under its cwd and runtime policy with exactly that returned pair, injects the
-bounded visible history, and archives the temporary fork. The canonical thread
+bounded visible history, and commits the branch binding. The canonical thread
 has the full OpenClaw harness tool surface. This is a visible-history branch, not
 a full native rollout clone: source reasoning, tool calls, and tool results are
 omitted. This and every later turn stays on the supervised Codex connection

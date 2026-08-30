@@ -3319,8 +3319,6 @@ describe("prepareCliRunContext", () => {
       runId: "run-test-room-event-tools",
       sessionEntry: {
         execHost: "node",
-        execSecurity: "allowlist",
-        execAsk: "on-miss",
         execNode: "mac-a",
       } as never,
       execOverrides: {
@@ -3378,7 +3376,7 @@ describe("prepareCliRunContext", () => {
         workspaceDir: context.workspaceDir,
         modelProvider: "anthropic",
         modelId: "test-model",
-        messageProvider: "discord",
+        messageProvider: "telegram",
         clientCaps: ["tool-events", "inline-widgets"],
         currentChannelId: "telegram:-100123:topic:42",
         currentThreadTs: "42",
@@ -3393,8 +3391,6 @@ describe("prepareCliRunContext", () => {
         nodeExecAllowed: true,
         execSession: {
           execHost: "node",
-          execSecurity: "allowlist",
-          execAsk: "on-miss",
           execNode: "mac-a",
         },
         execOverrides: {
@@ -3484,7 +3480,7 @@ describe("prepareCliRunContext", () => {
         senderName: "Canonical Name",
         senderUsername: "canonical-user",
         senderE164: "+15551234567",
-        messageProvider: "discord",
+        messageProvider: "telegram",
         groupId: "chat123",
         groupChannel: "ops",
         groupSpace: "workspace-a",
