@@ -1181,6 +1181,7 @@ test("sessions.compact stays generic when the only CLI binding is an auth tombst
         cliSessionId: undefined,
         trigger: "manual",
       }),
+      expect.objectContaining({ onCommitted: expect.any(Function) }),
     );
   } finally {
     ws.close();
