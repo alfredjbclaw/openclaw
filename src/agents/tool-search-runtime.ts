@@ -3,17 +3,11 @@ import {
   normalizeStringEntries,
   uniqueStrings,
 } from "@openclaw/normalization-core/string-normalization";
-import { getPluginToolMeta } from "../plugins/tools.js";
-import {
-  truncateSanitizedExternalContent,
-  wrapExternalContent,
-} from "../security/external-content.js";
+import { getPluginToolMeta } from "../plugins/tool-metadata.js";
 import { levenshteinDistance } from "../shared/levenshtein-distance.js";
 import {
   getBeforeToolCallFailureDisposition,
   isPreExecutionBlockedToolResult,
-  isToolWrappedWithBeforeToolCallHook,
-  wrapToolWithBeforeToolCallHook,
 } from "./agent-tools.before-tool-call.js";
 import { runWithToolExecutionValidation } from "./agent-tools.execution-validation.js";
 import { getChannelAgentToolMeta } from "./channel-tool-metadata.js";
@@ -25,9 +19,12 @@ import {
 } from "./tool-result-error.js";
 import {
   compactToolSearchCatalogEntry,
+  prepareToolSearchCatalogExecutionTool,
+  readToolSearchCatalogTelemetry,
   resolveCatalog,
   visibleCatalogEntries,
 } from "./tool-search-catalog.js";
+import { renderToolSearchControlText } from "./tool-search-control-result.js";
 import {
   buildLexicalIndex,
   readParameterText,
@@ -38,7 +35,6 @@ import {
 import { readToolSearchLimit } from "./tool-search-request.js";
 import { snapshotToolSearchTargetTranscriptResult } from "./tool-search-transcript.js";
 import type {
-  CatalogSource,
   CatalogVisibilityOptions,
   ToolSearchCallOptions,
   ToolSearchCatalogEntry,
@@ -132,8 +128,8 @@ function formatUnknownToolIdError(
   const recoveryText =
     options.recoverySurface === "code-mode"
       ? "Use openclaw.tools.search to find a tool, openclaw.tools.describe to inspect it, then openclaw.tools.call with the exact id or name."
-      : options.recoverySurface === "tools"
-        ? "Use tools.search to find a tool, tools.describe to inspect it, then tools.call with the exact id or name."
+      : options.recoverySurface === "catalog"
+        ? "Use catalog.search to find a callable tool handle, then call the handle or use its describe method."
         : "Use tool_search to find a tool, tool_describe to inspect it, then tool_call with the exact id or name.";
   if (suggestions.length === 0) {
     return `Unknown tool id: ${needle}. ${recoveryText}`;
@@ -268,21 +264,6 @@ export function prepareToolSearchDispatcherArguments(args: unknown): unknown {
   return { ...outerRest, ...nestedInput, id: selectorValue };
 }
 
-function getTelemetry(catalog: ToolSearchCatalogSession) {
-  const sources: Record<CatalogSource, number> = { openclaw: 0, mcp: 0, client: 0 };
-  for (const entry of catalog.entries) {
-    sources[entry.source] += 1;
-  }
-  return {
-    catalogSize: catalog.entries.length,
-    sources,
-    counterScope: catalog.counterScope,
-    searchCount: catalog.searchCount,
-    describeCount: catalog.describeCount,
-    callCount: catalog.callCount,
-  };
-}
-
 type CatalogSchemaName = "inputSchema" | "outputSchema";
 type CatalogSchemaValidation = ReturnType<
   typeof import("../plugins/schema-validator.js").validateJsonSchemaValue
@@ -299,6 +280,10 @@ type CachedToolSearchIndex = {
   >;
   index: ReturnType<typeof buildLexicalIndex<ToolSearchCatalogEntry>>;
 };
+type ToolSearchIndexCache = Map<
+  boolean | NonNullable<CatalogVisibilityOptions["allowedIds"]>,
+  CachedToolSearchIndex
+>;
 
 function matchesCachedToolSearchIndex(
   cached: CachedToolSearchIndex,
@@ -453,15 +438,12 @@ export class ToolSearchRuntime {
   private callSequence = 0;
   private readonly terminalTargetBatchByParent = new Map<string, boolean>();
   private readonly networkInvocations = new Map<string, { active: number; observed: boolean }>();
-  private readonly searchIndexes = new WeakMap<
-    ToolSearchCatalogSession,
-    Map<boolean, CachedToolSearchIndex>
-  >();
+  private readonly searchIndexes = new WeakMap<ToolSearchCatalogSession, ToolSearchIndexCache>();
 
   constructor(
     private readonly ctx: ToolSearchToolContext,
     private readonly config: ToolSearchConfig,
-    private readonly options: { validateInput?: boolean } = {},
+    private readonly options: { prepareInput?: boolean; validateInput?: boolean } = {},
   ) {}
 
   search = async (query: string, options?: { limit?: number } & CatalogVisibilityOptions) => {
@@ -480,13 +462,13 @@ export class ToolSearchRuntime {
     if (limit === 1 && exactMatches.length === 1) {
       return exactMatches.slice(0, limit).map((entry) => compactToolSearchCatalogEntry(entry));
     }
-    const includeMcp = options?.includeMcp !== false;
+    const indexKey = options?.allowedIds ?? options?.includeMcp !== false;
     let catalogIndexes = this.searchIndexes.get(catalog);
     if (!catalogIndexes) {
       catalogIndexes = new Map();
       this.searchIndexes.set(catalog, catalogIndexes);
     }
-    let cachedIndex = catalogIndexes.get(includeMcp);
+    let cachedIndex = catalogIndexes.get(indexKey);
     if (!cachedIndex || !matchesCachedToolSearchIndex(cachedIndex, entries)) {
       const indexedEntries = entries.map((entry) => ({
         entry,
@@ -507,7 +489,7 @@ export class ToolSearchRuntime {
           })),
         ),
       };
-      catalogIndexes.set(includeMcp, cachedIndex);
+      catalogIndexes.set(indexKey, cachedIndex);
     }
     const ranked = scoreLexical(cachedIndex.index, tokenizeQuery(query))
       .toSorted(
@@ -596,7 +578,9 @@ export class ToolSearchRuntime {
     }
     const pluginMeta = getPluginToolMeta(entry.tool as Parameters<typeof getPluginToolMeta>[0]);
     if (pluginMeta) {
-      return pluginMeta.mcp ? false : pluginMeta.replaySafe === true;
+      return pluginMeta.mcp
+        ? false
+        : pluginMeta.replaySafe === true && pluginMeta.sideEffecting !== true;
     }
     if (getChannelAgentToolMeta(entry.tool as never)) {
       return false;
@@ -643,10 +627,7 @@ export class ToolSearchRuntime {
       return snapshot;
     };
     const validateInput = this.options.validateInput && entry.source === "openclaw";
-    const executionTool =
-      validateInput && !isToolWrappedWithBeforeToolCallHook(entry.tool as never)
-        ? wrapToolWithBeforeToolCallHook(entry.tool as never)
-        : entry.tool;
+    const executionTool = prepareToolSearchCatalogExecutionTool(entry, this.options);
     const runExecution = async () => {
       const parentToolCallId = options?.parentToolCallId ?? toolCallId;
       const signal = options?.signal ?? this.ctx.abortSignal;
@@ -666,6 +647,7 @@ export class ToolSearchRuntime {
           sourceName: entry.sourceName,
           toolCallId,
           parentToolCallId: options?.parentToolCallId,
+          replaySafe: this.isReplaySafeExactId(entry.id),
           input: normalizedInput,
           signal,
           onUpdate: options?.onUpdate,
@@ -701,11 +683,10 @@ export class ToolSearchRuntime {
         )
       : await runExecution();
     const acceptedResult = await acceptResultBeforeProjection(result);
-    const parentToolCallId = options?.parentToolCallId;
-    if (parentToolCallId) {
+    if (options?.parentToolCallId) {
       this.terminalTargetBatchByParent.set(
-        parentToolCallId,
-        this.terminalTargetBatchByParent.get(parentToolCallId) !== false &&
+        options.parentToolCallId,
+        this.terminalTargetBatchByParent.get(options.parentToolCallId) !== false &&
           acceptedResult.terminate === true,
       );
     }
@@ -713,7 +694,7 @@ export class ToolSearchRuntime {
   };
 
   telemetry() {
-    return getTelemetry(resolveCatalog(this.ctx));
+    return readToolSearchCatalogTelemetry(this.ctx);
   }
 }
 
@@ -727,17 +708,14 @@ export function formatToolSearchControlResult<T>(
   let result: AgentToolResult<T> = jsonResult(payload);
   const content = result.content[0];
   if (runtime?.hasNetworkContent(parentToolCallId) && content?.type === "text") {
-    const bounded = truncateSanitizedExternalContent(content.text, 20_000);
-    const modelText = bounded.truncated
-      ? `${truncateSanitizedExternalContent(content.text, 19_988).text}\n[truncated]`
-      : bounded.text;
-    const text = wrapExternalContent(modelText, { source: "api" });
+    const { text } = renderToolSearchControlText(content.text, true);
     result = { ...result, content: [{ ...content, text }] };
   }
   const terminal =
     terminalBatchStatus !== "waiting" &&
     runtime?.takeTerminalTargetBatch(parentToolCallId) === true;
-  return terminalBatchStatus !== "failed" && terminal ? { ...result, terminate: true } : result;
+  // A failed guest cannot revoke an already completed tool's explicit terminal outcome.
+  return terminal ? { ...result, terminate: true } : result;
 }
 
 /** Keep dynamic failures rejected without exposing network-controlled error text. */

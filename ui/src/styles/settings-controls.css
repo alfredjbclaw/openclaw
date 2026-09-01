@@ -47,12 +47,6 @@ wa-radio-group.settings-segmented::part(form-control-label) {
   clip: rect(0, 0, 0, 0);
 }
 
-wa-radio-group.settings-segmented::part(radios) {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px;
-}
-
 .settings-segmented__btn {
   font-size: var(--control-ui-text-sm);
   font-weight: 550;
@@ -88,6 +82,18 @@ wa-radio-group.settings-segmented::part(radios) {
 .settings-segmented__btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+@media (forced-colors: active) {
+  .settings-segmented__btn--active {
+    text-decoration: underline 2px;
+    text-underline-offset: 3px;
+  }
+
+  .settings-segmented__btn:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
 }
 
 input.settings-input,

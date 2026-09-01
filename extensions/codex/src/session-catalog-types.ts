@@ -15,6 +15,8 @@ export type CodexCatalogHome = {
   label: string;
   agentDir: string;
   appServer: CodexAppServerRuntimeOptions;
+  /** Trusted local root for rollout provenance reads; absent for remote app-server connections. */
+  localSessionsRoot?: string;
   usesProcessHomeFallback: boolean;
 };
 
@@ -44,6 +46,8 @@ export type CodexSessionCatalogSession = {
 
 export type CodexSessionCatalogPage = {
   sessions: CodexSessionCatalogSession[];
+  /** Internal provenance filtered before this page reaches the provider catalog. */
+  managedThreads?: Array<{ threadId: string; rolloutPath?: string }>;
   nextCursor?: string;
   backwardsCursor?: string;
 };
@@ -53,8 +57,6 @@ export type CodexSessionCatalogPageParams = {
   limit?: number;
   searchTerm?: string;
   cwd?: string;
-  /** Bypasses the brief list memo after a specific thread lookup misses. */
-  forceRefresh?: boolean;
 };
 
 export type CodexSessionCatalogControl = {
@@ -62,6 +64,7 @@ export type CodexSessionCatalogControl = {
   connectionFingerprint?: string;
   withPinnedConnection<T>(run: (control: CodexSessionCatalogControl) => Promise<T>): Promise<T>;
   listPage(params: CodexSessionCatalogPageParams): Promise<CodexSessionCatalogPage>;
+  requireEligibleThread(threadId: string): Promise<CodexThread>;
   listDescendantPage(params: CodexThreadListParams): Promise<CodexThreadListResponse>;
   listTurnPage(params: CodexThreadTurnsListParams): Promise<CodexThreadTurnsListResponse>;
   forkThread(params: CodexThreadForkParams): Promise<CodexThreadForkResponse>;
