@@ -10,8 +10,6 @@ import {
   loadTranscriptEvents,
   loadTranscriptEventsSync,
   loadTranscriptHeaderSync,
-  loadTranscriptTailWindowSync,
-  transcriptTailOmitsBranchControlSync,
   readTranscriptStatsSync,
   readTranscriptEventAtSeqSync,
 } from "./session-accessor.sqlite-read.js";
@@ -50,8 +48,6 @@ export {
   loadTranscriptEvents,
   loadTranscriptEventsSync,
   loadTranscriptHeaderSync,
-  loadTranscriptTailWindowSync,
-  transcriptTailOmitsBranchControlSync,
   publishTranscriptUpdate,
   readLatestTranscriptAssistantText,
   readTranscriptEventAtSeqSync,
