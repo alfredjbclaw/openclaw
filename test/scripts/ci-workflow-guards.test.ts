@@ -1905,6 +1905,18 @@ NODE
     }
   });
 
+  it("serializes both Swift package suites on hosted macOS retries", () => {
+    const macosSwift = readCiWorkflow().jobs["macos-swift"];
+
+    expect(macosSwift.env.OPENCLAWKIT_TEST_EXECUTION).toContain("github.run_attempt > 1");
+    const openClawKitTests = macosSwift.steps.find(
+      (candidate: WorkflowStep) => candidate.name === "OpenClawKit tests",
+    );
+    expect(openClawKitTests?.run).toContain('if [[ "$OPENCLAWKIT_TEST_EXECUTION" == "parallel" ]]');
+    expect(openClawKitTests?.run).toContain("--parallel");
+    expect(openClawKitTests?.run).toContain("--no-parallel");
+  });
+
   it("keeps Testbox pull request validation off leased runner capacity", () => {
     const workflow = readTestboxWorkflow();
 
@@ -8295,6 +8307,11 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
     {
       label: "Git-owner fixture",
       changedPath: "test/scripts/fixtures/ci-platform-checkout.mjs",
+      selectedJobs: ["macos-node", "checks-windows"],
+    },
+    {
+      label: "Windows process census fixture",
+      changedPath: "test/scripts/fixtures/ci-windows-process-census.py",
       selectedJobs: ["macos-node", "checks-windows"],
     },
     {
