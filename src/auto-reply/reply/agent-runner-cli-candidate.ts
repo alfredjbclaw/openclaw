@@ -1,9 +1,11 @@
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
+import { buildCliMcpDelegationCapabilityBinding } from "../../agents/cli-runner/mcp-grant-context.js";
 import {
   cliSessionClearAuthFromRun,
   getCliSessionBinding,
   shouldClearFailedCliSessionBinding,
 } from "../../agents/cli-session.js";
+import { resolveDelegationCapability } from "../../agents/delegation-capability.js";
 import { findModelInCatalog } from "../../agents/model-catalog-lookup.js";
 import { withLocalSessionPlacementTurnAdmission } from "../../agents/session-placement-admission.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
@@ -342,6 +344,17 @@ export async function runCliFallbackCandidate(
             currentInboundEventKind: turn.followupRun.currentInboundEventKind,
             currentInboundContext: turn.followupRun.currentInboundContext,
             inputProvenance: turn.followupRun.run.inputProvenance,
+            // Candidate zero is the primary attempt; later candidates are
+            // fallbacks. Carry the runner-owned fact instead of inferring from
+            // this shared dispatch path, or primary CLI runs lose delegation.
+            ...buildCliMcpDelegationCapabilityBinding(
+              resolveDelegationCapability({
+                fallbackActive: params.isFallbackRetry,
+                inputProvenance: turn.followupRun.run.inputProvenance,
+                disableTools: turn.opts?.disableTools,
+                toolsAllow: turn.opts?.toolsAllow,
+              }),
+            ),
             modelProvider: params.provider,
             modelHasVision,
             modelContextWindow: selectedModelEntry?.contextWindow,

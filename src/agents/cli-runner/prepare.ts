@@ -283,6 +283,7 @@ async function resolveCliSkillsPrompt(params: {
 }): Promise<string> {
   const sandboxWorkspace = await ensureSandboxWorkspaceForSession({
     config: params.config,
+    agentId: params.agentId,
     sessionKey: params.sessionKey,
     workspaceDir: params.workspaceDir,
   });
@@ -467,6 +468,23 @@ async function prepareCliRunContextWithinReadFence(
   inputParams: RunCliAgentParams,
 ): Promise<PreparedCliRunContext> {
   let params = inputParams.config ? inputParams : { ...inputParams, config: getRuntimeConfig() };
+  if (params.sessionManager) {
+    // Caller-owned memory is authoritative even when empty. Correlation and native
+    // bindings survive; borrowed durable paths, writers, and turn leases do not.
+    params = {
+      ...params,
+      sessionFile: `in-memory:${params.sessionManager.getSessionId()}`,
+      sessionTarget: undefined,
+      storePath: undefined,
+      expectedLifecycleRevision: undefined,
+      expectedWriterRunId: undefined,
+      userTurnTranscriptRecorder: undefined,
+      persistAssistantTranscript: undefined,
+      prepareAssistantTranscriptMessage: undefined,
+      contextEngineLogicalTurnLease: undefined,
+      onContextEngineTurnCandidate: undefined,
+    };
+  }
   const runConfig = params.config!;
   const sessionOwner = normalizeAgentId(
     parseAgentSessionKey(params.sessionKey)?.agentId ||
@@ -647,8 +665,8 @@ async function prepareCliRunContextWithinReadFence(
     authStore = loadScopedAuthStore({ profileId: effectiveAuthProfileId });
     authCredential = authStore.profiles[effectiveAuthProfileId];
   } else if (
-    backendResolved.authEpochMode === "profile-only" ||
-    (backendResolved.prepareExecution && backendResolved.autoSelectAuthProfile !== false)
+    backendResolved.autoSelectAuthProfile !== false &&
+    (backendResolved.authEpochMode === "profile-only" || backendResolved.prepareExecution)
   ) {
     authStore = loadScopedAuthStore();
     effectiveAuthProfileId =
@@ -790,9 +808,7 @@ async function prepareCliRunContextWithinReadFence(
   const modelDisplay = `${params.provider}/${modelId}`;
   let openClawHistoryMessages: unknown[] | undefined;
   const loadOpenClawHistoryMessages = async () => {
-    openClawHistoryMessages ??= await loadCliSessionHistoryMessages({
-      sessionTarget: params.sessionTarget,
-    });
+    openClawHistoryMessages ??= await loadCliSessionHistoryMessages(params);
     return openClawHistoryMessages;
   };
   const promptBuildHookContext = {
@@ -813,7 +829,7 @@ async function prepareCliRunContextWithinReadFence(
     }
     try {
       return await resolvePromptBuildHookResult({
-        config: params.config ?? getRuntimeConfig(),
+        config: runConfig,
         prompt: params.prompt,
         messages: await loadOpenClawHistoryMessages(),
         hookCtx: promptBuildHookContext,
@@ -1017,7 +1033,13 @@ async function prepareCliRunContextWithinReadFence(
     );
   }
   const mcpDeliveryCaptureEnabled = bundleMcpEnabled && Boolean(mcpLoopbackRuntime);
-  const runtimeConfig = params.config ?? getRuntimeConfig();
+  const policySessionKey = params.runtimePolicySessionKey ?? params.sessionKey;
+  // The policy key owns scoped identity; direct CLI requesters fill unscoped keys only.
+  const policyAgentId = resolveSessionAgentIds({
+    sessionKey: policySessionKey,
+    config: runConfig,
+    fallbackAgentId: params.runtimePolicySessionKey ? params.agentId : sessionAgentId,
+  }).sessionAgentId;
   const shouldMaterializeRuntimePolicy =
     runtimeToolsAllowPolicy !== undefined &&
     !nodeClaudePlacement &&
@@ -1028,9 +1050,10 @@ async function prepareCliRunContextWithinReadFence(
     mcpLoopbackRuntime || shouldMaterializeRuntimePolicy
       ? buildCliMcpGrantContext({
           run: params,
-          config: runtimeConfig,
+          config: runConfig,
           requireExplicitMessageTarget,
           agentId: sessionAgentId,
+          runtimePolicyAgentId: params.runtimePolicySessionKey ? policyAgentId : undefined,
           modelProvider,
           modelId,
         })
@@ -1057,7 +1080,7 @@ async function prepareCliRunContextWithinReadFence(
   const projectedToolsBeforePromptBuild =
     (bundleMcpEnabled || shouldMaterializeRuntimePolicy) && mcpProjectionContext
       ? resolveProjectedTools({
-          cfg: runtimeConfig,
+          cfg: runConfig,
           ...mcpProjectionContext,
           ...(mcpToolAuth ? { authProfileStore: mcpToolAuth.store } : {}),
           ...(mcpToolAuth?.agentDir ? { authProfileStoreAgentDir: mcpToolAuth.agentDir } : {}),
@@ -1280,19 +1303,13 @@ async function prepareCliRunContextWithinReadFence(
     const loopbackServerConfig = mcpLoopbackRuntime
       ? prepareDeps.createMcpLoopbackServerConfig(mcpLoopbackRuntime.port)
       : undefined;
-    const policySessionKey = params.runtimePolicySessionKey ?? params.sessionKey;
-    const policyAgentId = resolveSessionAgentIds({
-      sessionKey: policySessionKey,
-      config: runtimeConfig,
-      agentId: params.runtimePolicySessionKey ? params.agentId : sessionAgentId,
-    }).sessionAgentId;
     const sandboxStatus = resolveSandboxRuntimeStatus({
-      cfg: runtimeConfig,
+      cfg: runConfig,
       sessionKey: policySessionKey,
       agentId: policyAgentId,
     });
     const nativeMcpCapabilityProfile = resolveConversationCapabilityProfile({
-      config: runtimeConfig,
+      config: runConfig,
       sessionKey: policySessionKey,
       runSessionKey:
         params.sessionKey && params.sessionKey !== policySessionKey ? params.sessionKey : undefined,
@@ -1478,7 +1495,7 @@ async function prepareCliRunContextWithinReadFence(
     const authBindingFingerprint = params.onSuccessfulAuthBinding
       ? resolveCliAuthBindingFingerprint({
           provider: params.provider,
-          config: params.config ?? getRuntimeConfig(),
+          config: runConfig,
           agentDir,
           ...(effectiveAuthProfileId ? { authProfileId: effectiveAuthProfileId } : {}),
           ...(resolvedProfileAuth ? { resolvedAuth: resolvedProfileAuth } : {}),
@@ -1843,6 +1860,7 @@ async function prepareCliRunContextWithinReadFence(
     const openClawHistoryPrompt = shouldPrepareOpenClawHistoryPrompt
       ? buildCliSessionHistoryPrompt({
           messages: await loadCliSessionReseedMessages({
+            sessionManager: params.sessionManager,
             sessionTarget: params.sessionTarget,
             allowRawTranscriptReseed,
             rawTranscriptReseedReason,
@@ -1896,11 +1914,10 @@ async function prepareCliRunContextWithinReadFence(
           .join("\n\n").length,
       },
     });
-    const contextEngineConfig = params.config ?? getRuntimeConfig();
     if (skipsTurnPreparation) {
       const preparedParams = await admitPreparedParams({
         ...params,
-        config: contextEngineConfig,
+        config: runConfig,
         prompt: preparedPrompt,
         transcriptPrompt: finalizedTranscriptPrompt,
         ...(requireExplicitMessageTarget ? { requireExplicitMessageTarget: true } : {}),
@@ -1938,7 +1955,7 @@ async function prepareCliRunContextWithinReadFence(
         executionTarget,
         reusableCliSession,
         hadSessionFile: false,
-        contextEngineConfig,
+        contextEngineConfig: runConfig,
         modelId,
         normalizedModel,
         contextWindowInfo,
@@ -1958,14 +1975,9 @@ async function prepareCliRunContextWithinReadFence(
       };
     }
     ensureContextEnginesInitialized();
-    const { sessionAgentId: contextEngineSessionAgentId } = resolveSessionAgentIds({
-      sessionKey: params.sessionKey,
-      config: contextEngineConfig,
-      agentId: sessionAgentId,
-    });
     // Context remains session-owned. Trusted helper runs may borrow a different
     // agentDir only for model/auth execution.
-    const contextEngineAgentDir = resolveAgentDir(contextEngineConfig, contextEngineSessionAgentId);
+    const contextEngineAgentDir = resolveAgentDir(runConfig, sessionAgentId);
     const contextEngineHostSupport = buildGenericCliContextEngineHostSupport({
       backendId: backendResolved.id,
       capabilities: backendResolved.contextEngineHostCapabilities,
@@ -1987,7 +1999,7 @@ async function prepareCliRunContextWithinReadFence(
       });
       resolvedContextEngine = params.contextEngineLogicalTurnLease.begin().engine;
     } else {
-      resolvedContextEngine = await resolveContextEngine(contextEngineConfig, {
+      resolvedContextEngine = await resolveContextEngine(runConfig, {
         agentDir: contextEngineAgentDir,
         workspaceDir,
       });
@@ -2001,13 +2013,11 @@ async function prepareCliRunContextWithinReadFence(
         host: contextEngineHostSupport,
       });
     }
-    const hadSessionFile = await hasCliSessionTranscript({
-      sessionTarget: params.sessionTarget,
-    });
+    const hadSessionFile = await hasCliSessionTranscript(params);
     const contextEngineTurnPrompt = params.transcriptPrompt ?? params.prompt;
     const preparedParams = await admitPreparedParams({
       ...params,
-      config: contextEngineConfig,
+      config: runConfig,
       prompt: preparedPrompt,
       transcriptPrompt: finalizedTranscriptPrompt,
       ...(requireExplicitMessageTarget ? { requireExplicitMessageTarget: true } : {}),
@@ -2043,7 +2053,7 @@ async function prepareCliRunContextWithinReadFence(
         ? { requiredClaudeLiveSessionGeneration: managedClaudeLiveSessionGeneration }
         : {}),
       hadSessionFile,
-      contextEngineConfig,
+      contextEngineConfig: runConfig,
       contextEngine,
       contextEngineTurnPrompt,
       ...(promptContext ? { promptContext, promptForHooks } : {}),
