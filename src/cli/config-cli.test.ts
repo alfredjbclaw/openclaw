@@ -5286,7 +5286,7 @@ describe("config cli", () => {
         "--replace",
       ]);
 
-      expectLogIncludes("Updated plugins. Restart the gateway to apply.");
+      expectLogIncludes("Updated plugins. A running gateway restarts itself to apply this");
       expectLogExcludes("Change will apply without restarting the gateway.");
     });
 
@@ -5305,7 +5305,7 @@ describe("config cli", () => {
 
       await runConfigCommand(["config", "unset", "plugins"]);
 
-      expectLogIncludes("Removed plugins. Restart the gateway to apply.");
+      expectLogIncludes("Removed plugins. A running gateway restarts itself to apply this");
       expectLogExcludes("Change will apply without restarting the gateway.");
     });
 
@@ -5318,8 +5318,41 @@ describe("config cli", () => {
 
       await runConfigSet("gateway.auth.mode", "token");
 
-      expectLogIncludes("Restart the gateway to apply.");
+      expectLogIncludes("A running gateway restarts itself to apply this");
       expectLogExcludes("Change will apply without restarting the gateway.");
+    });
+
+    it("states the running gateway self-restarts, with its abort deadline", async () => {
+      const resolved: OpenClawConfig = {
+        agents: { entries: { main: {} } },
+        gateway: { port: 18789 },
+      };
+      setSnapshot(resolved, withRuntimeDefaults(resolved));
+
+      await runConfigSet("plugins.load.paths", '["/tmp/openclaw-plugin"]');
+
+      // The operator is not the one restarting here: the running Gateway
+      // watches the config file, defers, then force-aborts in-flight runs.
+      // Telling them to "restart the gateway" hides that deadline.
+      expectLogIncludes(
+        "A running gateway restarts itself to apply this: it waits for active work " +
+          "to drain, then aborts in-flight runs after 5m. " +
+          "Restart manually if no gateway is running.",
+      );
+      expectLogExcludes("Restart the gateway to apply.");
+    });
+
+    it("still asks the operator to restart when live reload is off", async () => {
+      const resolved: OpenClawConfig = {
+        agents: { entries: { main: {} } },
+        gateway: { port: 18789, reload: { mode: "off" } },
+      };
+      setSnapshot(resolved, withRuntimeDefaults(resolved));
+
+      await runConfigSet("plugins.load.paths", '["/tmp/openclaw-plugin"]');
+
+      expectLogIncludes("Restart the gateway to apply.");
+      expectLogExcludes("A running gateway restarts itself");
     });
 
     it.each([
@@ -5341,7 +5374,7 @@ describe("config cli", () => {
         await runConfigSet(configPath, "false");
 
         expectLogIncludes(`Updated ${configPath}`);
-        expectLogIncludes("Restart the gateway to apply.");
+        expectLogIncludes("A running gateway restarts itself to apply this");
         expectLogExcludes("Change will apply without restarting the gateway.");
         expectLogExcludes("No gateway restart needed.");
       },
@@ -5361,7 +5394,7 @@ describe("config cli", () => {
         '[{"path":"agents.list[0].model.primary","value":"openai/gpt-5.5"},{"path":"gateway.auth.mode","value":"token"}]',
       ]);
 
-      expectLogIncludes("Updated 2 config paths. Restart the gateway to apply.");
+      expectLogIncludes("Updated 2 config paths. A running gateway restarts itself to apply this");
       expectLogExcludes("Change will apply without restarting the gateway.");
     });
   });

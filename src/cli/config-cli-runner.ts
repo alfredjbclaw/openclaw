@@ -13,6 +13,8 @@ import { buildGatewayReloadPlan } from "../gateway/config-reload-plan.js";
 import { resolveGatewayReloadSettings } from "../gateway/config-reload-settings.js";
 import { danger, info } from "../globals.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { formatDurationHuman } from "../infra/format-time/format-duration.js";
+import { resolveGatewayRestartDeferralTimeoutMs } from "../infra/restart.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { ExitError, writeRuntimeJson } from "../runtime.js";
 import { toDotPath } from "../shared/dot-path.js";
@@ -208,6 +210,28 @@ function expandActualChangedPaths(
   return [...expanded];
 }
 
+type GatewayReloadMode = ReturnType<typeof resolveGatewayReloadSettings>["mode"];
+
+/**
+ * A restart-required edit is applied by whoever owns the restart. With live
+ * reload enabled the running Gateway watches the config file and restarts
+ * itself, deferring until active work drains and then force-aborting whatever
+ * is still in flight. Telling the operator to "restart the gateway" in that
+ * mode is wrong twice over: the restart is not theirs to perform, and it
+ * carries a deadline that can abort their own in-flight run.
+ */
+function restartRequiredHint(mode: GatewayReloadMode): string {
+  if (mode === "off") {
+    return "Restart the gateway to apply.";
+  }
+  const deadline = formatDurationHuman(resolveGatewayRestartDeferralTimeoutMs());
+  return (
+    "A running gateway restarts itself to apply this: it waits for active work " +
+    `to drain, then aborts in-flight runs after ${deadline}. ` +
+    "Restart manually if no gateway is running."
+  );
+}
+
 function configApplyHintForOperations(
   operations: readonly ConfigSetOperation[],
   beforeConfig: OpenClawConfig,
@@ -223,14 +247,17 @@ function configApplyHintForOperations(
   if (paths.length === 0) {
     return "No gateway restart needed.";
   }
+  const reloadMode = resolveGatewayReloadSettings(afterConfig).mode;
   if (paths.some((path) => path === "plugins.entries" || path.startsWith("plugins.entries."))) {
-    return "Restart the gateway to apply.";
+    return restartRequiredHint(reloadMode);
   }
   const plan = buildGatewayReloadPlan(paths, { candidateConfig: afterConfig });
-  if (
-    plan.restartGateway ||
-    (plan.hotReasons.length > 0 && resolveGatewayReloadSettings(afterConfig).mode === "off")
-  ) {
+  if (plan.restartGateway) {
+    return restartRequiredHint(reloadMode);
+  }
+  if (plan.hotReasons.length > 0 && reloadMode === "off") {
+    // Live reload is disabled, so even a hot-appliable change needs the
+    // operator to restart; the Gateway will not pick it up on its own.
     return "Restart the gateway to apply.";
   }
   return plan.hotReasons.length > 0

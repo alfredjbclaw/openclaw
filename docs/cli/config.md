@@ -542,13 +542,16 @@ openclaw config set channels.discord.token \
 
 ## Applying changes
 
-After every successful `config set` / `config patch` / `config unset`, the CLI prints one of three hints so you know whether the gateway needs a restart:
+After every successful `config set` / `config patch` / `config unset`, the CLI prints one hint so you know whether the gateway needs a restart, and who performs it:
 
-| Hint                                                | Meaning                                |
-| --------------------------------------------------- | -------------------------------------- |
-| `Restart the gateway to apply.`                     | The changed path needs a full restart. |
-| `Change will apply without restarting the gateway.` | Hot reload picks it up automatically.  |
-| `No gateway restart needed.`                        | Nothing runtime-relevant changed.      |
+| Hint                                                 | Meaning                                                                                       |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `A running gateway restarts itself to apply this: …` | The changed path needs a full restart, and live reload is on, so the running Gateway does it. |
+| `Restart the gateway to apply.`                      | The changed path needs a full restart and live reload is `off`, so you must restart it.       |
+| `Change will apply without restarting the gateway.`  | Hot reload picks it up automatically.                                                         |
+| `No gateway restart needed.`                         | Nothing runtime-relevant changed.                                                             |
+
+With live reload enabled (the default), a restart-required edit is applied by the running Gateway, not by you: it watches the config file, waits for active work to drain, and then **force-restarts anyway** once the deferral window expires, aborting whatever is still in flight. The hint names that deadline so a long-running agent turn is not silently killed by its own config write. Set `gateway.reload.mode` to `off` to take ownership of restarts yourself.
 
 Effective changes to `plugins.entries` (or any subpath) require a restart, since the CLI cannot prove every plugin's reload metadata is loaded. Successful `config set` or `config unset` operations that produce no effective config diff print `No change` and leave the JSON5 file byte-for-byte untouched. A `config unset` target that is absent from the authored config exits with status 1 and also leaves the file untouched. Setting an absent key to a value equal to its runtime default is still an authored change and persists the explicit value.
 
