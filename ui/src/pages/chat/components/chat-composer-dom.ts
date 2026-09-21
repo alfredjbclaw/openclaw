@@ -126,7 +126,38 @@ export function replaceComposerPopoverAnchor(
   return next;
 }
 
+// Above this many characters, a draft is taller than any plausible CSS
+// max-height cap, so a measurement pass cannot change the clamped height.
+// Measuring anyway is the expensive path: `height:auto` plus a scrollHeight
+// read force a synchronous text layout whose cost scales with the draft
+// (~19ms at 300KB, ~63ms at 1MB per keystroke in a Chrome CDP harness), and
+// `observeTextareaOverflow` re-runs overflow updates on beforeinput/input,
+// multiplying that cost. Durable drafts are restored per session, which is
+// how a single session's composer turns slow while every other session
+// stays fast.
+export const COMPOSER_MEASUREMENT_MAX_CHARS = 20_000;
+
+function isBeyondMeasurementCap(el: HTMLTextAreaElement): boolean {
+  return el.value.length > COMPOSER_MEASUREMENT_MAX_CHARS;
+}
+
+function resolveComposerMaxHeight(el: HTMLTextAreaElement): number {
+  // The owning surface declares its cap in CSS. Retain the historical
+  // fallback for detached/test controls whose computed max-height is not a
+  // pixel value.
+  const computedMaxHeight = getComputedStyle(el).maxHeight.trim();
+  const pixelMaxHeight = /^(\d+(?:\.\d+)?)px$/u.exec(computedMaxHeight);
+  return pixelMaxHeight ? Number(pixelMaxHeight[1]) : 150;
+}
+
 function updateTextareaOverflow(el: HTMLTextAreaElement) {
+  if (isBeyondMeasurementCap(el)) {
+    // The draft is guaranteed to overflow its capped box; keep it scrollable
+    // without the layout-forcing reads. Fade attributes keep their last
+    // state until the draft shrinks back below the cap.
+    el.style.overflowY = "auto";
+    return;
+  }
   const scrollable = el.scrollHeight > el.clientHeight + 1;
   // Two 16px fades need enough vertical runway not to overlap into a narrow
   // opaque strip on short drafts. Small overflows still scroll, just unfaded.
@@ -151,22 +182,28 @@ export function adjustTextareaHeight(el: HTMLTextAreaElement) {
     el.removeAttribute("data-scroll-fade-bottom");
     return;
   }
+  if (isBeyondMeasurementCap(el)) {
+    // Pin straight to the CSS cap without the `height:auto` measurement
+    // pass. The height cannot change while the draft stays beyond the cap,
+    // so the sibling transcript needs no scroll compensation either.
+    const pinned = `${resolveComposerMaxHeight(el)}px`;
+    if (el.style.height !== pinned) {
+      el.style.height = pinned;
+    }
+    el.style.overflowY = "auto";
+    return;
+  }
   const thread = el.closest(".chat")?.querySelector<HTMLElement>(".chat-thread") ?? null;
   const scrollPosition = thread ? captureChatSessionScrollPosition(thread) : null;
   // Hide the browser's scrollbar while measuring; restore it only when the
   // final CSS-constrained height actually clips the draft.
   el.style.overflowY = "hidden";
   el.style.height = "auto";
-  // The owning surface declares its cap in CSS. Retain the historical fallback
-  // for detached/test controls whose computed max-height is not a pixel value.
-  const style = getComputedStyle(el);
-  const computedMaxHeight = style.maxHeight.trim();
-  const pixelMaxHeight = /^(\d+(?:\.\d+)?)px$/u.exec(computedMaxHeight);
-  const maxHeight = pixelMaxHeight ? Number(pixelMaxHeight[1]) : 150;
   // scrollHeight includes padding but not borders. Bordered answer fields share
   // this owner with the borderless composer and must not scroll on a single line.
-  const borderHeight = style.boxSizing === "border-box" ? el.offsetHeight - el.clientHeight : 0;
-  el.style.height = `${Math.min(el.scrollHeight + borderHeight, maxHeight)}px`;
+  const borderHeight =
+    getComputedStyle(el).boxSizing === "border-box" ? el.offsetHeight - el.clientHeight : 0;
+  el.style.height = `${Math.min(el.scrollHeight + borderHeight, resolveComposerMaxHeight(el))}px`;
   updateTextareaOverflow(el);
   // Once capped, the textarea can perturb the sibling transcript without
   // resizing its viewport, so ResizeObserver has no correction to apply.
