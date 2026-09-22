@@ -37,6 +37,7 @@ const server = await startControlUiE2eServer(
 const browser = await chromium.launch({ executablePath });
 const context = await browser.newContext({
   colorScheme: "dark",
+  deviceScaleFactor: 2,
   viewport: { width: 1280, height: 900 },
 });
 const page = await context.newPage();
@@ -48,7 +49,10 @@ try {
     content: [
       {
         type: "text",
-        text: `Transcript line ${index + 1}. The reader is following the end of this conversation.`,
+        text:
+          index === 39
+            ? "LAST LINE — this must stay against the composer."
+            : `Transcript line ${index + 1}.`,
       },
     ],
     timestamp: index + 1,
@@ -83,12 +87,50 @@ try {
       };
     });
 
+  const stamp = async (title: string, state: Awaited<ReturnType<typeof readState>>) => {
+    const boxForNote = await textarea.boundingBox();
+    await page.evaluate(
+      ({ text, top }) => {
+        let note = document.getElementById("proof-note");
+        if (!note) {
+          note = document.createElement("div");
+          note.id = "proof-note";
+          note.style.cssText =
+            "position:fixed;z-index:99999;left:300px;right:24px;background:#000;color:#fff;font:600 16px/1.35 ui-monospace,monospace;padding:8px 10px;border:2px solid #fff";
+          document.body.append(note);
+        }
+        note.style.top = `${top}px`;
+        note.textContent = text;
+      },
+      {
+        text: `${title} | height ${state?.height || "?"} | fade ${state?.fadeTop ? "top" : "-"}/${state?.fadeBottom ? "bottom" : "-"} | anchored ${state?.anchored} | thread ${state?.threadTop}/${state?.threadMax}`,
+        top: Math.max(8, (boxForNote?.y ?? 200) - 130),
+      },
+    );
+    const box = boxForNote;
+    const threadBox = await thread.boundingBox();
+    if (!box || !threadBox) {
+      throw new Error(`no box for ${title}`);
+    }
+    const y = Math.max(0, box.y - 150);
+    await page.screenshot({
+      path: path.join(outputDir, `${title}.png`),
+      clip: {
+        x: Math.max(0, box.x - 16),
+        y,
+        width: Math.min(1280 - box.x + 16, box.width + 32),
+        height: Math.min(900 - y, box.y + box.height - y + 8),
+      },
+    });
+    await textarea.screenshot({ path: path.join(outputDir, `${title}-composer.png`) });
+  };
+
   await thread.evaluate((el) => {
     el.scrollTop = el.scrollHeight;
   });
   await textarea.fill("Short draft.");
   const beforeAnchor = await readState();
-  await page.screenshot({ path: path.join(outputDir, "before-anchor.png") });
+  await stamp("before-anchor", beforeAnchor);
 
   const overCap = "Readable line ".repeat(2200);
   await textarea.evaluate((el, value) => {
@@ -99,7 +141,7 @@ try {
   }, overCap);
   await page.waitForTimeout(250);
   const afterAnchor = await readState();
-  await page.screenshot({ path: path.join(outputDir, "after-anchor.png") });
+  await stamp("after-anchor", afterAnchor);
 
   const fadedDraft = `${"Browsed draft line that should fade at the edges.\n".repeat(30)}`;
   await textarea.fill(fadedDraft);
@@ -110,7 +152,7 @@ try {
   });
   await page.waitForTimeout(200);
   const beforeFade = await readState();
-  await page.screenshot({ path: path.join(outputDir, "before-fade.png") });
+  await stamp("before-fade", beforeFade);
 
   await textarea.evaluate((el, value) => {
     el.value = value;
@@ -120,7 +162,12 @@ try {
   }, overCap);
   await page.waitForTimeout(250);
   const afterFade = await readState();
-  await page.screenshot({ path: path.join(outputDir, "after-fade.png") });
+  await stamp("after-fade", afterFade);
+
+  await textarea.fill("Shrunk back.");
+  await page.waitForTimeout(200);
+  const afterShrink = await readState();
+  await stamp("after-shrink", afterShrink);
 
   const report = {
     commit,
@@ -129,6 +176,7 @@ try {
     afterAnchor,
     beforeFade,
     afterFade,
+    afterShrink,
   };
   writeFileSync(path.join(outputDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   mkdirSync(outputDir, { recursive: true });

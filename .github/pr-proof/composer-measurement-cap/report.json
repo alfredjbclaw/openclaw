@@ -1,6 +1,6 @@
 {
-  "commit": "4c31b77b3081848327870831178fea626f2cd15c",
-  "baseUrl": "http://127.0.0.1:60435/",
+  "commit": "dd3c4ad4683a950d454a4fa57de078fa4f9aaaf9",
+  "baseUrl": "http://127.0.0.1:61625/",
   "beforeAnchor": {
     "height": "36px",
     "overflow": "hidden",
@@ -39,6 +39,16 @@
     "chars": 30800,
     "threadTop": 3492,
     "threadMax": 3492,
+    "anchored": true
+  },
+  "afterShrink": {
+    "height": "36px",
+    "overflow": "hidden",
+    "fadeTop": false,
+    "fadeBottom": false,
+    "chars": 12,
+    "threadTop": 3392,
+    "threadMax": 3392,
     "anchored": true
   }
 }
