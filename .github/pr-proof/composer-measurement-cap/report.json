@@ -1,0 +1,44 @@
+{
+  "commit": "4c31b77b3081848327870831178fea626f2cd15c",
+  "baseUrl": "http://127.0.0.1:60435/",
+  "beforeAnchor": {
+    "height": "36px",
+    "overflow": "hidden",
+    "fadeTop": false,
+    "fadeBottom": false,
+    "chars": 12,
+    "threadTop": 3392,
+    "threadMax": 3392,
+    "anchored": true
+  },
+  "afterAnchor": {
+    "height": "156px",
+    "overflow": "auto",
+    "fadeTop": false,
+    "fadeBottom": false,
+    "chars": 30800,
+    "threadTop": 3492,
+    "threadMax": 3492,
+    "anchored": true
+  },
+  "beforeFade": {
+    "height": "156px",
+    "overflow": "auto",
+    "fadeTop": true,
+    "fadeBottom": false,
+    "chars": 1500,
+    "threadTop": 3492,
+    "threadMax": 3492,
+    "anchored": true
+  },
+  "afterFade": {
+    "height": "156px",
+    "overflow": "auto",
+    "fadeTop": false,
+    "fadeBottom": false,
+    "chars": 30800,
+    "threadTop": 3492,
+    "threadMax": 3492,
+    "anchored": true
+  }
+}
